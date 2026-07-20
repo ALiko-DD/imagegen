@@ -1,5 +1,7 @@
 # ImageGen Skill
 
+[English](README_EN.md) | 简体中文
+
 面向 Codex 的图像生成与实验性图像编辑 Skill。它不是一条固定提示词，而是一套完整工作流：先诊断请求、保留用户约束，再从 13 类结构模板中选择唯一的 Prompt 骨架，按需组合视觉噪声控制与修饰器，最后完成 Prompt 校验、图像生成和 PNG 验证。
 
 ## 核心能力
@@ -292,6 +294,7 @@ experimental_bearer_token = "replace-with-your-token"
 ```text
 .
 ├── README.md
+├── README_EN.md
 └── imagegen/
     ├── SKILL.md
     ├── agents/
