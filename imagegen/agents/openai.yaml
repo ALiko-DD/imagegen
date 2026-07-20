@@ -1,0 +1,7 @@
+interface:
+  display_name: "ImageGen"
+  short_description: "Native-format image Prompts with visual-noise control"
+  default_prompt: "Use $imagegen to diagnose the request, select the structure family and visual-noise controls, preserve the native Prompt format, and create a validated PNG."
+
+policy:
+  allow_implicit_invocation: true
