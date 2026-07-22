@@ -18,7 +18,7 @@
 ## 安装与更新
 
 > [!IMPORTANT]
-> “安装”和“更新”执行完全相同的覆盖流程：先确认本仓库中的 `imagegen/SKILL.md` 存在，再删除 `~/.codex/skills/.system/imagegen` 和 `~/.codex/skills/imagegen` 中已有的旧副本，最后把本仓库的整个 `imagegen` 文件夹复制到 `~/.codex/skills/imagegen`。如果两个位置都没有旧副本，则直接安装。
+> “安装”和“更新”执行完全相同的覆盖流程：先确认本仓库中的 `imagegen/SKILL.md` 存在，再删除 `~/.codex/skills/.system/imagegen` 和 `~/.codex/skills/imagegen` 中已有的旧副本，最后把本仓库的整个 `imagegen` 文件夹复制到 `~/.codex/skills/.system/imagegen`。如果两个位置都没有旧副本，则直接安装到 `.system` 目录。
 
 这样可以避免 `.system` 与用户目录同时存在两个同名 Skill，导致版本不确定、旧模板残留或重复触发。不要把新文件与旧目录合并，必须完整替换。
 
@@ -32,7 +32,7 @@
 无论这是首次安装还是更新：
 1. 先确认仓库根目录下的 imagegen/SKILL.md 存在；
 2. 删除 ~/.codex/skills/.system/imagegen 和 ~/.codex/skills/imagegen 中已有的旧副本，路径不存在时跳过；
-3. 将仓库根目录下的整个 imagegen 文件夹复制到 ~/.codex/skills/imagegen；
+3. 将仓库根目录下的整个 imagegen 文件夹复制到 ~/.codex/skills/.system/imagegen；
 4. 不要合并旧文件；
 5. 完成后检查 SKILL.md、agents、prompts、references、scripts 是否齐全。
 ```
@@ -44,20 +44,21 @@
 ```powershell
 $source = (Resolve-Path ".\imagegen" -ErrorAction Stop).Path
 $skillsRoot = Join-Path $HOME ".codex\skills"
-$systemCopy = Join-Path $skillsRoot ".system\imagegen"
-$target = Join-Path $skillsRoot "imagegen"
+$systemRoot = Join-Path $skillsRoot ".system"
+$target = Join-Path $systemRoot "imagegen"
+$userCopy = Join-Path $skillsRoot "imagegen"
 
 if (-not (Test-Path -LiteralPath (Join-Path $source "SKILL.md"))) {
     throw "源目录不是有效的 imagegen Skill：$source"
 }
 
-if ($source -in @($systemCopy, $target)) {
+if ($source -in @($target, $userCopy)) {
     throw "请从独立下载或克隆的仓库目录执行，不能把已安装目录作为更新源。"
 }
 
-New-Item -ItemType Directory -Force -Path $skillsRoot | Out-Null
+New-Item -ItemType Directory -Force -Path $systemRoot | Out-Null
 
-@($systemCopy, $target) | ForEach-Object {
+@($target, $userCopy) | ForEach-Object {
     if (Test-Path -LiteralPath $_) {
         Remove-Item -LiteralPath $_ -Recurse -Force
     }
@@ -81,18 +82,19 @@ set -eu
 
 source_dir="$(cd "./imagegen" && pwd)"
 skills_root="$HOME/.codex/skills"
-system_copy="$skills_root/.system/imagegen"
-target="$skills_root/imagegen"
+system_root="$skills_root/.system"
+target="$system_root/imagegen"
+user_copy="$skills_root/imagegen"
 
 test -f "$source_dir/SKILL.md"
 
-if [ "$source_dir" = "$system_copy" ] || [ "$source_dir" = "$target" ]; then
+if [ "$source_dir" = "$target" ] || [ "$source_dir" = "$user_copy" ]; then
   printf '%s\n' '请从独立下载或克隆的仓库目录执行，不能把已安装目录作为更新源。' >&2
   exit 1
 fi
 
-mkdir -p "$skills_root"
-rm -rf -- "$system_copy" "$target"
+mkdir -p "$system_root"
+rm -rf -- "$target" "$user_copy"
 cp -R "$source_dir" "$target"
 test -f "$target/SKILL.md"
 

@@ -18,7 +18,7 @@ An image-generation and experimental image-editing Skill for Codex. ImageGen is 
 ## Installation and Updates
 
 > [!IMPORTANT]
-> Installation and updating use the same replacement procedure. First verify that this repository contains `imagegen/SKILL.md`. Then remove any existing copies at `~/.codex/skills/.system/imagegen` and `~/.codex/skills/imagegen`. Finally, copy the repository's complete `imagegen` directory to `~/.codex/skills/imagegen`. If neither old path exists, install it directly.
+> Installation and updating use the same replacement procedure. First verify that this repository contains `imagegen/SKILL.md`. Then remove any existing copies at `~/.codex/skills/.system/imagegen` and `~/.codex/skills/imagegen`. Finally, copy the repository's complete `imagegen` directory to `~/.codex/skills/.system/imagegen`. If neither old path exists, install it directly under `.system`.
 
 This prevents two same-named Skill copies from coexisting in `.system` and the user Skill directory, which can cause uncertain version selection, stale templates, or duplicate invocation. Do not merge the new files into an old directory; always replace the directory completely.
 
@@ -34,7 +34,7 @@ For both a first-time installation and an update:
 2. Delete existing copies at ~/.codex/skills/.system/imagegen and
    ~/.codex/skills/imagegen, skipping paths that do not exist.
 3. Copy the complete imagegen directory from the repository root to
-   ~/.codex/skills/imagegen.
+   ~/.codex/skills/.system/imagegen.
 4. Do not merge with old files.
 5. Verify that SKILL.md, agents, prompts, references, and scripts are present.
 ```
@@ -46,20 +46,21 @@ Run from the repository root:
 ```powershell
 $source = (Resolve-Path ".\imagegen" -ErrorAction Stop).Path
 $skillsRoot = Join-Path $HOME ".codex\skills"
-$systemCopy = Join-Path $skillsRoot ".system\imagegen"
-$target = Join-Path $skillsRoot "imagegen"
+$systemRoot = Join-Path $skillsRoot ".system"
+$target = Join-Path $systemRoot "imagegen"
+$userCopy = Join-Path $skillsRoot "imagegen"
 
 if (-not (Test-Path -LiteralPath (Join-Path $source "SKILL.md"))) {
     throw "The source is not a valid imagegen Skill directory: $source"
 }
 
-if ($source -in @($systemCopy, $target)) {
+if ($source -in @($target, $userCopy)) {
     throw "Run this command from a separate downloaded or cloned repository, not from the installed Skill directory."
 }
 
-New-Item -ItemType Directory -Force -Path $skillsRoot | Out-Null
+New-Item -ItemType Directory -Force -Path $systemRoot | Out-Null
 
-@($systemCopy, $target) | ForEach-Object {
+@($target, $userCopy) | ForEach-Object {
     if (Test-Path -LiteralPath $_) {
         Remove-Item -LiteralPath $_ -Recurse -Force
     }
@@ -83,18 +84,19 @@ set -eu
 
 source_dir="$(cd "./imagegen" && pwd)"
 skills_root="$HOME/.codex/skills"
-system_copy="$skills_root/.system/imagegen"
-target="$skills_root/imagegen"
+system_root="$skills_root/.system"
+target="$system_root/imagegen"
+user_copy="$skills_root/imagegen"
 
 test -f "$source_dir/SKILL.md"
 
-if [ "$source_dir" = "$system_copy" ] || [ "$source_dir" = "$target" ]; then
+if [ "$source_dir" = "$target" ] || [ "$source_dir" = "$user_copy" ]; then
   printf '%s\n' 'Run this command from a separate downloaded or cloned repository, not from the installed Skill directory.' >&2
   exit 1
 fi
 
-mkdir -p "$skills_root"
-rm -rf -- "$system_copy" "$target"
+mkdir -p "$system_root"
+rm -rf -- "$target" "$user_copy"
 cp -R "$source_dir" "$target"
 test -f "$target/SKILL.md"
 
