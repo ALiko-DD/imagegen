@@ -20,6 +20,9 @@
 > [!IMPORTANT]
 > “安装”和“更新”执行完全相同的覆盖流程：先确认本仓库中的 `imagegen/SKILL.md` 存在，再删除 `~/.codex/skills/.system/imagegen` 和 `~/.codex/skills/imagegen` 中已有的旧副本，最后把本仓库的整个 `imagegen` 文件夹复制到 `~/.codex/skills/.system/imagegen`。如果两个位置都没有旧副本，则直接安装到 `.system` 目录。
 
+> [!WARNING]
+> 用户请求安装或更新 ImageGen，即同时授权自动安装缺失的必要运行时，不再单独询问“是否安装 Python”。安装前必须检查 Node.js 18+ 和 Python 3.8+；只要其中一个可用即可继续。如果两者均不可用，必须直接使用当前系统可用的包管理器安装 Python 3.8 或更高版本，默认优先安装 Python 3.12。只有管理员密码、UAC、网络故障、包管理器缺失或其他外部阻塞必须由用户处理时，才要求用户介入。未通过安装后的版本复检，不得宣称 ImageGen 已安装完成或可以运行。
+
 这样可以避免 `.system` 与用户目录同时存在两个同名 Skill，导致版本不确定、旧模板残留或重复触发。不要把新文件与旧目录合并，必须完整替换。
 
 ### 让 Codex 执行
@@ -31,10 +34,14 @@
 
 无论这是首次安装还是更新：
 1. 先确认仓库根目录下的 imagegen/SKILL.md 存在；
-2. 删除 ~/.codex/skills/.system/imagegen 和 ~/.codex/skills/imagegen 中已有的旧副本，路径不存在时跳过；
-3. 将仓库根目录下的整个 imagegen 文件夹复制到 ~/.codex/skills/.system/imagegen；
-4. 不要合并旧文件；
-5. 完成后检查 SKILL.md、agents、prompts、references、scripts 是否齐全。
+2. 检查 Node.js 18+ 和 Python 3.8+，记录两者的可用状态和版本；
+3. 如果两者均不可用，不要询问我是否安装 Python，直接使用系统可用的包管理器安装 Python 3.8+，默认优先 Python 3.12；
+4. 只有管理员密码、UAC、网络故障、包管理器缺失或其他外部阻塞需要我处理时，才暂停并告诉我具体操作；
+5. 安装 Python 后刷新环境变量并重新检查版本；未通过复检时不得继续或宣称安装成功；
+6. 删除 ~/.codex/skills/.system/imagegen 和 ~/.codex/skills/imagegen 中已有的旧副本，路径不存在时跳过；
+7. 将仓库根目录下的整个 imagegen 文件夹复制到 ~/.codex/skills/.system/imagegen；
+8. 不要合并旧文件；
+9. 完成后检查 SKILL.md、agents、prompts、references、scripts 是否齐全，并报告安装位置、Node.js 状态、Python 状态、最终选择的运行时和运行前检查结果。
 ```
 
 ### Windows PowerShell
@@ -43,14 +50,73 @@
 
 ```powershell
 $source = (Resolve-Path ".\imagegen" -ErrorAction Stop).Path
+if (-not (Test-Path -LiteralPath (Join-Path $source "SKILL.md"))) {
+    throw "源目录不是有效的 imagegen Skill：$source"
+}
+
+function Test-NodeRuntime {
+    if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
+        return $false
+    }
+
+    & node -e "process.exit(Number(process.versions.node.split('.')[0]) >= 18 ? 0 : 1)"
+    return $LASTEXITCODE -eq 0
+}
+
+function Get-PythonRuntime {
+    $candidates = @(
+        [pscustomobject]@{ Command = "py"; Prefix = @("-3") },
+        [pscustomobject]@{ Command = "python"; Prefix = @() },
+        [pscustomobject]@{ Command = "python3"; Prefix = @() }
+    )
+
+    foreach ($candidate in $candidates) {
+        if (-not (Get-Command $candidate.Command -ErrorAction SilentlyContinue)) {
+            continue
+        }
+
+        $prefix = [string[]]$candidate.Prefix
+        & $candidate.Command @prefix -c "import sys; raise SystemExit(0 if sys.version_info >= (3, 8) else 1)"
+        if ($LASTEXITCODE -eq 0) {
+            return $candidate
+        }
+    }
+
+    return $null
+}
+
+$nodeAvailable = Test-NodeRuntime
+$pythonRuntime = Get-PythonRuntime
+
+if (-not $nodeAvailable -and -not $pythonRuntime) {
+    if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
+        throw "Node.js 18+ 和 Python 3.8+ 均不可用，且未找到 winget。请先处理包管理器或管理员权限阻塞。"
+    }
+
+    & winget install --id Python.Python.3.12 --exact --scope user --silent --accept-package-agreements --accept-source-agreements
+    if ($LASTEXITCODE -ne 0) {
+        throw "Python 自动安装失败。请处理网络、UAC、管理员权限或包管理器错误后重试。"
+    }
+
+    $machinePath = [Environment]::GetEnvironmentVariable("Path", "Machine")
+    $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
+    $env:Path = @($machinePath, $userPath) -join ";"
+
+    $python312 = Join-Path $env:LOCALAPPDATA "Programs\Python\Python312\python.exe"
+    if (Test-Path -LiteralPath $python312) {
+        $env:Path = "$(Split-Path -Parent $python312);$env:Path"
+    }
+
+    $pythonRuntime = Get-PythonRuntime
+    if (-not $pythonRuntime) {
+        throw "Python 已执行安装，但 Python 3.8+ 版本复检失败，不能继续安装 ImageGen。"
+    }
+}
+
 $skillsRoot = Join-Path $HOME ".codex\skills"
 $systemRoot = Join-Path $skillsRoot ".system"
 $target = Join-Path $systemRoot "imagegen"
 $userCopy = Join-Path $skillsRoot "imagegen"
-
-if (-not (Test-Path -LiteralPath (Join-Path $source "SKILL.md"))) {
-    throw "源目录不是有效的 imagegen Skill：$source"
-}
 
 if ($source -in @($target, $userCopy)) {
     throw "请从独立下载或克隆的仓库目录执行，不能把已安装目录作为更新源。"
@@ -70,7 +136,29 @@ if (-not (Test-Path -LiteralPath (Join-Path $target "SKILL.md"))) {
     throw "安装校验失败：$target"
 }
 
+$nodeStatus = if ($nodeAvailable) {
+    & node --version
+} else {
+    "不可用或低于 18"
+}
+
+$pythonStatus = if ($pythonRuntime) {
+    $pythonPrefix = [string[]]$pythonRuntime.Prefix
+    & $pythonRuntime.Command @pythonPrefix -c "import platform; print(platform.python_version())"
+} else {
+    "不可用或低于 3.8"
+}
+
+$selectedRuntime = if ($nodeAvailable) {
+    "Node.js $nodeStatus"
+} else {
+    "Python $pythonStatus"
+}
+
 Write-Host "ImageGen 已安装到：$target"
+Write-Host "Node.js：$nodeStatus"
+Write-Host "Python：$pythonStatus"
+Write-Host "选择的运行时：$selectedRuntime"
 ```
 
 ### macOS / Linux
@@ -81,12 +169,90 @@ Write-Host "ImageGen 已安装到：$target"
 set -eu
 
 source_dir="$(cd "./imagegen" && pwd)"
+test -f "$source_dir/SKILL.md"
+
+node_is_usable() {
+  command -v node >/dev/null 2>&1 &&
+    node -e 'process.exit(Number(process.versions.node.split(".")[0]) >= 18 ? 0 : 1)'
+}
+
+find_python() {
+  for candidate in python3 python; do
+    if command -v "$candidate" >/dev/null 2>&1 &&
+      "$candidate" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 8) else 1)'
+    then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
+run_as_root() {
+  if [ "$(id -u)" -eq 0 ]; then
+    "$@"
+  elif command -v sudo >/dev/null 2>&1; then
+    sudo "$@"
+  else
+    printf '%s\n' '需要管理员权限，但当前系统没有 sudo。请先处理权限阻塞。' >&2
+    return 1
+  fi
+}
+
+node_available=false
+if node_is_usable; then
+  node_available=true
+fi
+
+python_bin="$(find_python || true)"
+
+if [ "$node_available" != true ] && [ -z "$python_bin" ]; then
+  case "$(uname -s)" in
+    Darwin)
+      if command -v brew >/dev/null 2>&1; then
+        brew install python
+      else
+        printf '%s\n' 'Node.js 18+ 和 Python 3.8+ 均不可用，且未找到 Homebrew。请先处理包管理器阻塞。' >&2
+        exit 1
+      fi
+      ;;
+    Linux)
+      if command -v apt-get >/dev/null 2>&1; then
+        run_as_root apt-get update
+        run_as_root apt-get install -y python3
+      elif command -v dnf >/dev/null 2>&1; then
+        run_as_root dnf install -y python3
+      elif command -v yum >/dev/null 2>&1; then
+        run_as_root yum install -y python3
+      elif command -v pacman >/dev/null 2>&1; then
+        run_as_root pacman -Sy --noconfirm python
+      elif command -v zypper >/dev/null 2>&1; then
+        run_as_root zypper --non-interactive install python3
+      elif command -v apk >/dev/null 2>&1; then
+        run_as_root apk add --no-cache python3
+      else
+        printf '%s\n' 'Node.js 18+ 和 Python 3.8+ 均不可用，且未找到受支持的包管理器。' >&2
+        exit 1
+      fi
+      ;;
+    *)
+      printf '%s\n' '当前操作系统无法自动安装 Python，请先处理运行环境阻塞。' >&2
+      exit 1
+      ;;
+  esac
+
+  hash -r
+  python_bin="$(find_python || true)"
+  if [ -z "$python_bin" ]; then
+    printf '%s\n' 'Python 已执行安装，但 Python 3.8+ 版本复检失败，不能继续安装 ImageGen。' >&2
+    exit 1
+  fi
+fi
+
 skills_root="$HOME/.codex/skills"
 system_root="$skills_root/.system"
 target="$system_root/imagegen"
 user_copy="$skills_root/imagegen"
-
-test -f "$source_dir/SKILL.md"
 
 if [ "$source_dir" = "$target" ] || [ "$source_dir" = "$user_copy" ]; then
   printf '%s\n' '请从独立下载或克隆的仓库目录执行，不能把已安装目录作为更新源。' >&2
@@ -98,10 +264,27 @@ rm -rf -- "$target" "$user_copy"
 cp -R "$source_dir" "$target"
 test -f "$target/SKILL.md"
 
+if [ "$node_available" = true ]; then
+  node_status="$(node --version)"
+  selected_runtime="Node.js $node_status"
+else
+  node_status="不可用或低于 18"
+  selected_runtime="Python $("$python_bin" -c 'import platform; print(platform.python_version())')"
+fi
+
+if [ -n "$python_bin" ]; then
+  python_status="$("$python_bin" -c 'import platform; print(platform.python_version())')"
+else
+  python_status="不可用或低于 3.8"
+fi
+
 printf 'ImageGen 已安装到：%s\n' "$target"
+printf 'Node.js：%s\n' "$node_status"
+printf 'Python：%s\n' "$python_status"
+printf '选择的运行时：%s\n' "$selected_runtime"
 ```
 
-安装完成后建议开启一个新的 Codex 任务；如果 Skill 未出现在可用列表中，再重启 Codex。
+安装流程不得仅因缺少 Node.js 而失败；Python 3.8+ 可作为完整回退运行时。如果 Node.js 和 Python 都缺失，必须先自动安装并复检 Python，再复制 Skill。无论通过 Codex 还是手动命令安装，最终提示都必须列出安装位置、Node.js 状态、Python 状态、实际选择的运行时，以及配置或 `preflight` 检查结果；配置尚未就绪时必须如实说明，不能把它描述为完整可用。安装完成后建议开启一个新的 Codex 任务；如果 Skill 未出现在可用列表中，再重启 Codex。
 
 ## 快速开始
 
@@ -202,6 +385,9 @@ printf 'ImageGen 已安装到：%s\n' "$target"
 
 - 首选 Node.js 18 或更高版本：`imagegen/scripts/imagegen.mjs`
 - Node.js 不可用或版本过低时，使用 Python 3.8 或更高版本：`imagegen/scripts/imagegen.py`
+- Node.js 18+ 与 Python 3.8+ 至少必须有一个可用；这是安装成功的硬性条件。
+- 如果两者都不可用，安装或更新请求已经授权安装程序直接安装 Python 3.8+，默认优先 Python 3.12，不再单独询问用户是否安装。
+- 自动安装后必须刷新环境变量并重新检查版本；只有外部权限、管理员密码、UAC、网络或包管理器阻塞才需要用户介入。
 - 两个运行时均不要求安装第三方依赖。
 - Prompt 文件必须是严格 UTF-8、无 BOM；包含中文等非 ASCII 内容时，只通过 `--prompt-file` 传入。
 - 默认输出目录为当前工作目录下的 `outputs/`。
