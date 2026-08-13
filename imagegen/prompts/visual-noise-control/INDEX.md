@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Use these cross-cutting authoring controls after request diagnosis, request extraction, structure-family routing, and native-format selection. They reduce avoidable visual contamination and synthetic rendering without creating another structure family or modifier taxonomy.
+Use these cross-cutting authoring controls after the main agent has extracted the request, selected a structure family, and selected the native format. They reduce avoidable visual contamination and synthetic rendering without creating another structure family or modifier taxonomy.
 
 The controls are composable. Do not force the request into exactly one file.
 
@@ -17,8 +17,8 @@ The controls are composable. Do not force the request into exactly one file.
 
 ## Selection sequence
 
-1. Complete conditional request diagnosis when required.
-2. Extract the full user contract.
+1. Have the main agent diagnose and extract the full user contract from the original request and attachments.
+2. Resolve blocking ambiguity or conflict with one minimal user clarification.
 3. Select one of the thirteen structure families.
 4. Select JSON, prose, or Markdown.
 5. Identify visual roles, regions, surfaces, edit targets, and preservation anchors.
@@ -27,7 +27,7 @@ The controls are composable. Do not force the request into exactly one file.
 8. Reconcile the stack with explicit user requirements and existing modifiers.
 9. Author concise control clauses in the selected native format.
 
-Do not ask diagnosis subagents to select controls or write Prompt clauses.
+The main agent selects controls and writes Prompt clauses as part of the same pre-generation pass; do not delegate either task to subagents.
 
 ## Control-stack matrix
 
@@ -42,6 +42,54 @@ Do not ask diagnosis subagents to select controls or write Prompt clauses.
 | Global style transformation | Edit integrity in global-transformation mode + target rendering controls |
 | Mixed photographic and graphic canvas | Scope photographic controls to captured subjects and clean controls to graphic regions |
 | Multi-image series | Use shared controls only when every output needs them; otherwise scope controls per output |
+
+## Conditional clean-fidelity recipe
+
+Use this recipe when the requested result is a pristine, high-fidelity photographic image, especially a studio product image, catalog image, polished advertising visual, or another clean photoreal presentation. It operationalizes user wording such as `clean image`, `smooth surfaces`, `minimal texture`, `low noise`, `high resolution`, `crisp details`, `sharp focus`, `studio lighting`, `photorealistic`, and `no film grain` without blindly pasting that booster stack.
+
+1. Start with `integrity.low-digital-noise` and only the image-integrity clauses needed for the likely failure modes.
+2. Add `photo.clean-fidelity` and the applicable physical-lighting, focus, or material clauses for genuinely photographic roles.
+3. Add `clean.pristine-surfaces` and other clean-rendering clauses only to backgrounds, gradients, graphic elements, or surfaces that should actually be smooth and pristine.
+4. Use `photo.studio-lighting` only for a requested or clearly entailed controlled studio/catalog setup; otherwise use the scene's physically plausible lighting.
+5. Use `clean.no-film-grain` only when a grain-free finish is requested or clearly compatible with the intended medium.
+6. Treat `high resolution` as a request for resolved, output-relevant detail, not permission to invent `8K`, `16K`, HDR, extreme sharpening, or uniform micro-detail. API `quality: high` remains a separate runtime setting.
+7. When high-contrast text, a logo, label linework, or fine graphics sit on a smooth photographic surface, apply the text-neighborhood safeguard below; general low-noise wording is insufficient for this risk.
+
+For a clean studio product image, the usual stack is:
+
+```text
+image-integrity: low digital noise + coherent detail
+photographic-rendering: clean photoreal fidelity + controlled studio lighting + believable focus + credible materials
+clean-rendering: smooth backdrop and pristine named surfaces + no film grain when compatible
+```
+
+This is a selection recipe, not boilerplate. Author the smallest nonduplicative set of atomic clauses in the Prompt's native format.
+
+### Recipe exclusions
+
+- Do not apply `smooth surfaces` or `minimal texture` globally to skin, hair, fabric, wood, stone, paper, foliage, food, or other materially textured subjects.
+- Do not add `photorealistic`, photographic focus, or studio-lighting language to UI, diagrams, flat graphics, anime, painting, or other non-photographic roles.
+- Do not require a grain-free finish when the user asks for film, documentary, analog, weathered, printed, or intentionally textured output.
+- Do not turn `crisp details` or `sharp focus` into uniformly sharp depth, crunchy microcontrast, halos, or synthetic microtexture.
+
+## Text-neighborhood safeguard
+
+Trigger this safeguard when all are true:
+
+- text, a logo, label linework, or another high-contrast graphic must appear on a photographic or rendered surface;
+- the supporting surface is smooth, softly graded, glossy, translucent, molded, painted, or otherwise visually uniform;
+- the graphic must remain small, exact, reference-matched, or sharply legible.
+
+Treat two named roles separately:
+
+1. **Printed strokes:** require one clean boundary per stroke with correct shape and spacing. Do not request global or aggressive sharpening.
+2. **Immediate supporting surface:** keep the narrow surface around and between glyphs as the same smooth, low-frequency material field as the surrounding unprinted area.
+
+Select `clean.single-edge-graphics` and `clean.graphic-neighborhood`. For reference-image editing, also select `edit.protect-printed-region`; add `edit.preserve-source-pixels` when unchanged source pixels can satisfy the requested composition. Keep text-bearing surfaces near front-facing and sufficiently large when the layout permits. Do not rotate, shrink, relight, or reproject them more than the requested result requires.
+
+Prohibit only the relevant local failures: echo contours, concentric or ripple-like bands, embossed or glowing halos, alternating light-dark rings, chromatic fringes, contaminated pixels, and local texture amplification around strokes. Do not repeat the same prohibition globally in multiple sections.
+
+Prompt wording can reduce but cannot guarantee removal of model-level ringing. Exact packaging text or logos are more reliably preserved by retaining original source pixels or compositing an authoritative supplied asset than by asking the model to redraw them.
 
 ## Default and exceptions
 
@@ -87,9 +135,11 @@ Resolve same-role contradictions before authoring. Do not hide both sides of a b
 - If visible grain and noise-free output target the same role, ask one minimal clarification.
 - Do not prohibit plastic globally when the subject is plastic, resin, vinyl, enamel, clay, or a toy. Require physically credible material response instead.
 - Do not apply restrained photographic sharpening to text, diagram lines, icons, or intentionally crisp UI edges.
+- On text-bearing photographic surfaces, do not pair `sharp focus` or `crisp details` with local sharpening; use the text-neighborhood safeguard instead.
 - Do not apply clean no-grain requirements to named analog, documentary, weathered, printed, or textured roles.
 - Prefer positive rendering behavior followed by a short targeted exclusion list.
 - Do not add unrequested boosters such as `8K`, `16K`, `masterpiece`, `maximum detail`, `HDR`, or `extreme sharpness`.
+- Do not paste a fixed quality-keyword stack; translate each compatible intent into observable, role-scoped rendering behavior.
 
 ## Native-format insertion
 
@@ -140,10 +190,12 @@ Use `Visual Integrity` and, when needed, `Edit Integrity` sections only when Mar
 
 ## Preflight checklist
 
-- [ ] Diagnosis, request extraction, family routing, and format selection occurred before control selection.
+- [ ] Main-agent request diagnosis, extraction, family routing, and format selection occurred before control selection.
 - [ ] The control stack matches the requested medium and named visual roles.
 - [ ] Intentional texture exceptions are explicit and scoped.
 - [ ] Same-role grain, cleanliness, material, and preservation conflicts are resolved.
+- [ ] The clean-fidelity recipe, when selected, is role-scoped and contains no incompatible booster terms.
+- [ ] Every high-risk text-bearing smooth surface uses separate stroke and immediate-surface controls.
 - [ ] JSON remains valid JSON; prose and Markdown remain their selected formats.
 - [ ] Every scoped target already exists in the Prompt.
 - [ ] No selected requirement is duplicated.

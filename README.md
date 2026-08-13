@@ -315,14 +315,14 @@ printf '选择的运行时：%s\n' "$selected_runtime"
 
 ## 工作流程
 
-1. **诊断请求**：判断是单图生成、参考图编辑还是多输出任务；复杂请求会进入双重独立诊断流程。
+1. **诊断请求**：主 Agent 在一次生成前流程中判断是单图生成、参考图编辑还是多输出任务，并直接完成诊断、提取、模板选择、Prompt 编写与审查，不委派给子代理。
 2. **提取请求合同**：记录用途、受众、主体、精确文字、事实、数量、布局、风格、尺寸、禁止项和编辑边界。
 3. **选择结构模板**：从 13 个互斥结构家族中选择一个；编辑加系列任务会拆成两个阶段。
 4. **选择原生格式**：根据可验证性使用 JSON、自然语言或 Markdown，不为了统一外观强制转换格式。
 5. **组合视觉控制**：先选择视觉噪声控制，再只加载真正需要的修饰维度。
 6. **语义与结构审查**：检查事实、数量、文字、布局、保存边界、冲突、占位符和 JSON 语法。
 7. **执行一次授权生成**：内置工具优先；回退脚本只负责一次命令，并最多进行一次符合条件的技术重试。
-8. **验证并报告**：校验 PNG 签名与尺寸，检查可见污染或误编辑，报告真实限制后停止。
+8. **验证并报告**：确认文件存在且 PNG 签名与尺寸有效；仅在用户明确要求质量审查时进行目视检查，报告真实限制后停止。
 
 详细规则见 [`imagegen/SKILL.md`](imagegen/SKILL.md)。
 
@@ -433,6 +433,8 @@ node imagegen/scripts/imagegen.mjs verify \
 
 `prompt-check` 只做结构校验，返回的 `semantic_review_required: true` 表示仍需人工或 Agent 完成语义审查。`--dry-run` 不是生成结果。
 
+`generate` 和 `edit` 可选用 `--reasoning-effort high|xhigh|max`。普通生成应省略该参数；只有任务确实需要更高推理强度时才显式添加。
+
 ### 支持尺寸
 
 | 方向或比例 | 参数 |
@@ -493,7 +495,6 @@ experimental_bearer_token = "replace-with-your-token"
     │   └── visual-noise-control/
     ├── references/
     │   ├── prompt-system.md
-    │   ├── request-diagnosis.md
     │   └── runtime-contract.md
     └── scripts/
         ├── imagegen.mjs

@@ -6,7 +6,6 @@ import fs from "node:fs";
 import fsp from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
 
 const MODEL = "gpt-5.6-terra";
 const ENDPOINT_PATH = "/backend-api/codex/responses";
@@ -15,6 +14,7 @@ const RECOMMENDED_PROMPT_CHARACTERS = Object.freeze({ min: 200, max: 4_000 });
 const MAX_INPUT_IMAGES = 16;
 const MAX_INPUT_BYTES = 50 * 1024 * 1024;
 const REQUEST_TIMEOUT_MS = 600_000;
+const SUPPORTED_REASONING_EFFORTS = new Set(["high", "xhigh", "max"]);
 const SUPPORTED_SIZES = new Set([
   "auto",
   "1024x1024",
@@ -24,8 +24,21 @@ const SUPPORTED_SIZES = new Set([
   "1672x941",
 ]);
 const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
-const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
-const FIXTURE_DIR = path.join(SCRIPT_DIR, "tests", "fixtures");
+const SELF_TEST_CONFIG = [
+  'model_provider = "vendor"',
+  "",
+  "[model_providers.vendor]",
+  'base_url = "https://example.invalid/api"',
+  'experimental_bearer_token = "fixture-token"',
+].join("\n");
+const SELF_TEST_CONFIG_MISSING_TOKEN = [
+  'model_provider = "vendor"',
+  "",
+  "[model_providers.vendor]",
+  'base_url = "https://example.invalid/api"',
+].join("\n");
+const SELF_TEST_PNG_BASE64 =
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScL4WQAAAABJRU5ErkJggg==";
 
 class SkillError extends Error {
   constructor(code, message, options = {}) {
@@ -33,6 +46,7 @@ class SkillError extends Error {
     this.name = "SkillError";
     this.code = code;
     this.retryable = Boolean(options.retryable);
+    this.networkRequestPerformed = Boolean(options.networkRequestPerformed);
     this.details = options.details ?? null;
   }
 }
@@ -80,10 +94,12 @@ function parseArgs(argv) {
     force: false,
     dryRun: false,
     size: "auto",
+    reasoningEffort: undefined,
     mode: command === "edit" ? "edit" : "generate",
   };
   const valueOptions = new Map([
     ["--prompt-file", "promptFile"],
+    ["--reasoning-effort", "reasoningEffort"],
     ["--mode", "mode"],
     ["--size", "size"],
     ["--out", "out"],
@@ -124,8 +140,23 @@ function parseArgs(argv) {
       `Unsupported size "${options.size}". Use ${[...SUPPORTED_SIZES].join(", ")}.`,
     );
   }
+  if (
+    options.reasoningEffort !== undefined
+    && !SUPPORTED_REASONING_EFFORTS.has(options.reasoningEffort)
+  ) {
+    throwSkill(
+      "E_RUNTIME",
+      `Unsupported --reasoning-effort "${options.reasoningEffort}". Use ${[...SUPPORTED_REASONING_EFFORTS].join(", ")}.`,
+    );
+  }
   if (!new Set(["generate", "edit"]).has(options.mode)) {
     throwSkill("E_RUNTIME", "--mode must be generate or edit.");
+  }
+  if (
+    options.reasoningEffort !== undefined
+    && !new Set(["generate", "edit"]).has(options.command)
+  ) {
+    throwSkill("E_RUNTIME", "--reasoning-effort is only supported for generate and edit.");
   }
   if (options.out && options.outDir) {
     throwSkill("E_WRITE", "Use --out or --out-dir, not both.");
@@ -443,7 +474,7 @@ async function loadInputImages(imagePaths) {
   return images;
 }
 
-function buildPayload(promptText, mode, size, images = []) {
+function buildPayload(promptText, mode, size, images = [], reasoningEffort) {
   const tool = {
     type: "image_generation",
     quality: "high",
@@ -478,6 +509,7 @@ function buildPayload(promptText, mode, size, images = []) {
         content,
       },
     ],
+    ...(reasoningEffort ? { reasoning: { effort: reasoningEffort } } : {}),
   };
 }
 
@@ -489,6 +521,7 @@ function requestSummary(payload, mode) {
     stream: payload.stream,
     tool: payload.tools[0],
     tool_choice: payload.tool_choice,
+    requested_reasoning_effort: payload.reasoning?.effort ?? null,
     endpoint_path: ENDPOINT_PATH,
     mode,
     input_types: content.map((item) => item.type),
@@ -818,6 +851,20 @@ function classifyRequestFailure(error) {
   };
 }
 
+function getReasoningRejectionMessage(status, body, payload) {
+  const requestedReasoningEffort =
+    typeof payload.reasoning?.effort === "string"
+      ? payload.reasoning.effort
+      : null;
+  if (
+    !requestedReasoningEffort
+    || (status !== 400 && status !== 422)
+  ) {
+    return null;
+  }
+  return `Provider rejected a request that included reasoning.effort=\"${requestedReasoningEffort}\". The Skill did not remove or downgrade it; the upstream model/tool combination may not support it. HTTP ${status}. ${body}`;
+}
+
 async function requestOnce(config, payload) {
   const endpoint = `${config.baseUrl}${ENDPOINT_PATH}`;
   const controller = new AbortController();
@@ -837,7 +884,10 @@ async function requestOnce(config, payload) {
     });
   } catch (error) {
     const failure = classifyRequestFailure(error);
-    throwSkill("E_HTTP", failure.message, { retryable: failure.retryable });
+    throwSkill("E_HTTP", failure.message, {
+      retryable: failure.retryable,
+      networkRequestPerformed: true,
+    });
   } finally {
     clearTimeout(timeout);
   }
@@ -845,21 +895,35 @@ async function requestOnce(config, payload) {
   if (!response.ok) {
     const body = safeText(await response.text());
     if (response.status === 401 || response.status === 403) {
-      throwSkill("E_AUTH", `Provider authentication failed with HTTP ${response.status}. ${body}`);
+      throwSkill("E_AUTH", `Provider authentication failed with HTTP ${response.status}. ${body}`, {
+        networkRequestPerformed: true,
+      });
     }
     if (response.status === 429) {
       throw new SkillError("E_RATE_LIMIT", `Provider rate limit returned HTTP 429. ${body}`, {
         retryable: true,
+        networkRequestPerformed: true,
         details: { response },
       });
     }
     if (response.status === 408 || response.status >= 500) {
       throw new SkillError("E_HTTP", `Provider returned HTTP ${response.status}. ${body}`, {
         retryable: true,
+        networkRequestPerformed: true,
         details: { response },
       });
     }
-    throwSkill("E_HTTP", `Provider returned HTTP ${response.status}. ${body}`);
+    const reasoningRejection = getReasoningRejectionMessage(
+      response.status,
+      body,
+      payload,
+    );
+    if (reasoningRejection) {
+      throwSkill("E_HTTP", reasoningRejection, { networkRequestPerformed: true });
+    }
+    throwSkill("E_HTTP", `Provider returned HTTP ${response.status}. ${body}`, {
+      networkRequestPerformed: true,
+    });
   }
   return parseSseStream(response.body);
 }
@@ -908,6 +972,11 @@ async function runPreflight(options) {
       text_decoder: typeof TextDecoder === "function",
     },
     model: MODEL,
+    reasoning_effort: {
+      supported_values: [...SUPPORTED_REASONING_EFFORTS],
+      default: null,
+      default_behavior: "No reasoning field is sent unless --reasoning-effort is explicit.",
+    },
     output_directory: outputDirectory,
     network_request_performed: false,
     warnings: [],
@@ -940,7 +1009,13 @@ async function runGenerateOrEdit(options) {
   const prompt = await readPrompt(options.promptFile, mode);
   const config = await readConfig();
   const images = mode === "edit" ? await loadInputImages(options.images) : [];
-  const payload = buildPayload(prompt.text, mode, options.size, images);
+  const payload = buildPayload(
+    prompt.text,
+    mode,
+    options.size,
+    images,
+    options.reasoningEffort,
+  );
   const summary = requestSummary(payload, mode);
   const outputPath = resolveOutputPath(options);
   await ensureWritableDirectory(path.dirname(outputPath));
@@ -954,6 +1029,7 @@ async function runGenerateOrEdit(options) {
       command: mode,
       runtime: runtimeName(),
       model: MODEL,
+      requested_reasoning_effort: options.reasoningEffort ?? null,
       prompt_file: prompt.promptFile,
       prompt_characters: prompt.characters,
       output_path: outputPath,
@@ -973,6 +1049,7 @@ async function runGenerateOrEdit(options) {
     command: mode,
     runtime: runtimeName(),
     model: MODEL,
+    requested_reasoning_effort: options.reasoningEffort ?? null,
     output_path: outputPath,
     width: written.width,
     height: written.height,
@@ -1002,10 +1079,6 @@ async function runVerify(options) {
   };
 }
 
-async function readFixture(name) {
-  return fsp.readFile(path.join(FIXTURE_DIR, name), "utf8");
-}
-
 function assertTest(condition, message) {
   if (!condition) {
     throw new Error(message);
@@ -1020,7 +1093,7 @@ async function runSelfTest() {
   };
 
   await record("config-valid", async () => {
-    const config = parseConfigText(await readFixture("config-valid.toml"));
+    const config = parseConfigText(SELF_TEST_CONFIG);
     assertTest(config.provider === "vendor", "provider mismatch");
     assertTest(config.baseUrl === "https://example.invalid/api", "base URL mismatch");
     assertTest(config.token === "fixture-token", "token mismatch");
@@ -1029,7 +1102,7 @@ async function runSelfTest() {
   await record("config-missing-token", async () => {
     let code = null;
     try {
-      parseConfigText(await readFixture("config-missing-token.toml"));
+      parseConfigText(SELF_TEST_CONFIG_MISSING_TOKEN);
     } catch (error) {
       code = error.code;
     }
@@ -1080,20 +1153,30 @@ async function runSelfTest() {
     assertTest(code === "E_PROMPT_STRUCTURE", "placeholder should be E_PROMPT_STRUCTURE");
   });
 
-  const pngBase64 = (await readFixture("png-1x1.b64")).trim();
+  const pngBase64 = SELF_TEST_PNG_BASE64;
   await record("png-validation", async () => {
     const result = verifyPngBytes(decodeBase64Strict(pngBase64));
     assertTest(result.width === 1 && result.height === 1, "PNG dimensions mismatch");
   });
 
   await record("sse-final-priority", async () => {
-    const text = (await readFixture("sse-final.txt")).replaceAll("__PNG_BASE64__", pngBase64);
+    const text = [
+      `data: {"type":"response.image_generation_call.partial_image","partial_image_b64":"${pngBase64}"}`,
+      "",
+      `data: {"type":"response.output_item.done","item":{"id":"ig_1","type":"image_generation_call","result":"${pngBase64}"}}`,
+      "",
+      "data: [DONE]",
+    ].join("\n");
     const result = parseSseText(text);
     assertTest(result.source === "item.result", "final result should win");
   });
 
   await record("sse-partial-fallback", async () => {
-    const text = (await readFixture("sse-partial.txt")).replaceAll("__PNG_BASE64__", pngBase64);
+    const text = [
+      `data: {"type":"response.image_generation_call.partial_image","partial_image_b64":"${pngBase64}"}`,
+      "",
+      "data: [DONE]",
+    ].join("\n");
     const result = parseSseText(text);
     assertTest(result.source === "partial_image_b64", "partial fallback mismatch");
   });
@@ -1101,23 +1184,112 @@ async function runSelfTest() {
   await record("sse-malformed", async () => {
     let code = null;
     try {
-      parseSseText(await readFixture("sse-malformed.txt"));
+      parseSseText("data: {invalid-json}\n");
     } catch (error) {
       code = error.code;
     }
     assertTest(code === "E_SSE", "malformed SSE should be E_SSE");
   });
 
+  await record("reasoning-effort-arguments", async () => {
+    const valid = parseArgs([
+      "generate",
+      "--prompt-file",
+      "prompt.txt",
+      "--reasoning-effort",
+      "xhigh",
+      "--dry-run",
+    ]);
+    assertTest(valid.reasoningEffort === "xhigh", "xhigh argument mismatch");
+
+    let invalidCode = null;
+    try {
+      parseArgs([
+        "generate",
+        "--prompt-file",
+        "prompt.txt",
+        "--reasoning-effort",
+        "turbo",
+      ]);
+    } catch (error) {
+      invalidCode = error.code;
+    }
+    assertTest(invalidCode === "E_RUNTIME", "invalid reasoning effort should fail locally");
+
+    let unsupportedCommandCode = null;
+    try {
+      parseArgs(["preflight", "--reasoning-effort", "high"]);
+    } catch (error) {
+      unsupportedCommandCode = error.code;
+    }
+    assertTest(
+      unsupportedCommandCode === "E_RUNTIME",
+      "reasoning effort must be limited to generate and edit",
+    );
+  });
+
+  await record("reasoning-rejection-diagnostic", async () => {
+    const message = getReasoningRejectionMessage(400, "unsupported", {
+      reasoning: { effort: "max" },
+    });
+    assertTest(
+      message?.includes('reasoning.effort="max"'),
+      "reasoning rejection must name the requested effort",
+    );
+    assertTest(
+      getReasoningRejectionMessage(503, "unavailable", {
+        reasoning: { effort: "max" },
+      }) === null,
+      "transient failures must not be mislabeled as reasoning incompatibility",
+    );
+    assertTest(
+      getReasoningRejectionMessage(400, "bad request", {}) === null,
+      "requests without reasoning must not receive a reasoning diagnostic",
+    );
+  });
+
   await record("request-shape", async () => {
     const image = {
       dataUrl: `data:image/png;base64,${pngBase64}`,
     };
-    const generate = buildPayload(samplePrompt, "generate", "1024x1024", []);
-    const edit = buildPayload(samplePrompt, "edit", "auto", [image, image]);
-    assertTest(generate.model === MODEL, "model mismatch");
-    assertTest(generate.tools[0].size === "1024x1024", "size mismatch");
-    assertTest(edit.input[0].content.filter((item) => item.type === "input_image").length === 2, "edit image order mismatch");
-    assertTest(edit.input[0].content.at(-1).type === "input_text", "input_text should be last");
+    const defaultGenerate = buildPayload(
+      samplePrompt,
+      "generate",
+      "1024x1024",
+      [],
+    );
+    const xhighGenerate = buildPayload(
+      samplePrompt,
+      "generate",
+      "1024x1024",
+      [],
+      "xhigh",
+    );
+    const maxEdit = buildPayload(
+      samplePrompt,
+      "edit",
+      "auto",
+      [image, image],
+      "max",
+    );
+    assertTest(defaultGenerate.model === MODEL, "model mismatch");
+    assertTest(defaultGenerate.reasoning === undefined, "default must omit reasoning");
+    assertTest(defaultGenerate.tools[0].quality === "high", "image quality mismatch");
+    assertTest(defaultGenerate.tools[0].size === "1024x1024", "size mismatch");
+    assertTest(
+      xhighGenerate.reasoning?.effort === "xhigh",
+      "xhigh reasoning payload mismatch",
+    );
+    assertTest(
+      requestSummary(xhighGenerate, "generate").requested_reasoning_effort === "xhigh",
+      "xhigh reasoning summary mismatch",
+    );
+    assertTest(maxEdit.reasoning?.effort === "max", "max reasoning payload mismatch");
+    assertTest(
+      maxEdit.input[0].content.filter((item) => item.type === "input_image").length === 2,
+      "edit image order mismatch",
+    );
+    assertTest(maxEdit.input[0].content.at(-1).type === "input_text", "input_text should be last");
   });
 
   await record("request-timeout-contract", async () => {
@@ -1176,7 +1348,7 @@ try {
     runtime: runtimeName(),
     code: skillError.code,
     message: safeText(skillError.message),
-    network_request_performed: false,
+    network_request_performed: skillError.networkRequestPerformed,
   });
   process.exitCode = 1;
 }

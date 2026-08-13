@@ -319,14 +319,14 @@ but use morning, midday, and night scenes respectively.
 
 ## Workflow
 
-1. **Diagnose the request:** classify it as single-image generation, reference-image editing, or a multi-output request; complex requests enter a two-pass independent diagnosis process.
+1. **Diagnose the request:** the main agent classifies it as single-image generation, reference-image editing, or a multi-output request, then owns diagnosis, extraction, family selection, Prompt writing, and review in one pre-generation pass without delegating to subagents.
 2. **Extract the request contract:** record the use, audience, subject, exact text, facts, counts, layout, style, dimensions, prohibitions, and edit boundaries.
 3. **Select a structure family:** choose one of thirteen mutually exclusive families; an edit-plus-series request is separated into two stages.
 4. **Choose the native format:** use JSON, prose, or Markdown according to verifiability instead of forcing one universal format.
 5. **Compose visual controls:** select visual-noise controls first, then load only modifier dimensions that materially affect the result.
 6. **Review semantics and structure:** verify facts, counts, exact text, layout, preservation boundaries, conflicts, placeholders, and JSON syntax.
 7. **Execute one authorized pass:** prefer the built-in route; the fallback runtime owns one command and at most one eligible technical retry.
-8. **Verify and report:** validate the PNG signature and dimensions, inspect visible contamination or collateral edits, report real limitations, and stop.
+8. **Verify and report:** confirm that the file exists and has a valid PNG signature and dimensions; perform visual inspection only when the user explicitly requests quality review, report real limitations, and stop.
 
 See [`imagegen/SKILL.md`](imagegen/SKILL.md) for the complete operating rules.
 
@@ -437,6 +437,8 @@ node imagegen/scripts/imagegen.mjs verify \
 
 `prompt-check` performs structural validation only. A successful result includes `semantic_review_required: true` because human or agent semantic review is still required. A `--dry-run` is never a generated result.
 
+`generate` and `edit` optionally accept `--reasoning-effort high|xhigh|max`. Omit this option for ordinary generation and add it only when the task genuinely needs greater reasoning effort.
+
 ### Supported Sizes
 
 | Intended orientation or ratio | Parameter |
@@ -497,7 +499,6 @@ The fallback service must support this Skill's streaming Responses request and `
     │   └── visual-noise-control/
     ├── references/
     │   ├── prompt-system.md
-    │   ├── request-diagnosis.md
     │   └── runtime-contract.md
     └── scripts/
         ├── imagegen.mjs

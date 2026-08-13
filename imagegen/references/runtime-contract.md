@@ -11,8 +11,8 @@ Pass non-ASCII Prompt content only through a strict UTF-8 Prompt file. Never pas
 ```text
 preflight
 prompt-check --prompt-file <path> [--mode generate|edit]
-generate --prompt-file <path> [--size <size>] [--out <png> | --out-dir <dir>] [--force] [--dry-run]
-edit --prompt-file <path> --image <path> [--image <path> ...] [--size <size>] [--out <png> | --out-dir <dir>] [--force] [--dry-run]
+generate --prompt-file <path> [--reasoning-effort high|xhigh|max] [--size <size>] [--out <png> | --out-dir <dir>] [--force] [--dry-run]
+edit --prompt-file <path> --image <path> [--image <path> ...] [--reasoning-effort high|xhigh|max] [--size <size>] [--out <png> | --out-dir <dir>] [--force] [--dry-run]
 verify --file <png>
 self-test
 ```
@@ -20,6 +20,23 @@ self-test
 `dry-run` validates the Prompt, inputs, configuration, output destination, and request shape without a network request. It never prints the full Prompt or bearer token and never counts as generated output.
 
 `prompt-check` accepts JSON, prose, or Markdown. It validates strict UTF-8, common corruption markers, non-empty content, the 20,000-character safety cap, JSON syntax when applicable, and unresolved placeholders. Its success summary includes `semantic_review_required: true`; semantic review remains the agent's responsibility.
+
+## Reasoning effort
+
+`--reasoning-effort` is optional and only applies to `generate` and `edit`. Accepted values are `high`, `xhigh`, and `max`.
+
+- Omit it for ordinary image generation. The runtime then deliberately sends no `reasoning` field.
+- Use `xhigh` for complex reference-image edits, strict multi-region layouts, dense exact-copy constraints, or other requests where planning the tool call is materially useful.
+- Use `max` only for unusually complex, coupled requirements after the configured model/tool combination has been verified to accept it. Never make `max` the default.
+- `tools[0].quality: high` controls image-generation quality; it is not a reasoning setting.
+
+When explicit, the runtime sends the canonical field:
+
+```json
+{ "reasoning": { "effort": "xhigh" } }
+```
+
+The JSON result reports `requested_reasoning_effort`, never an asserted effective value. A configured gateway may cap the request according to the authenticated API Key; the runtime must not inspect Key configuration, infer the cap, alter `Originator` or `User-Agent`, or try another path to obtain a higher level. If a request carrying explicit reasoning receives HTTP 400 or 422, return the error unchanged in intent: do not silently remove or downgrade the field, and state that the model/tool combination may not support it.
 
 ## Size mapping
 

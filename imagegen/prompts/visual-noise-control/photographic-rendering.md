@@ -37,6 +37,8 @@ Apply by visual role rather than by structure-family name.
 
 | ID | Select when | English clause |
 | --- | --- | --- |
+| `photo.clean-fidelity` | A clean high-fidelity photographic result is required | Render as clean, high-fidelity photoreal imagery with resolved subject detail, natural tonal transitions, and no synthetic microtexture or overprocessed sharpness. |
+| `photo.studio-lighting` | A controlled studio or catalog setup is requested or entailed | Use controlled studio lighting with coherent highlights, reflections, contact shadows, and tonal separation appropriate to the named subject and materials. |
 | `photo.plausible-lighting` | Lighting realism matters | Use one physically plausible lighting setup with consistent direction, softness, falloff, reflections, and contact shadows. |
 | `photo.optical-depth` | Depth and focus matter | Use believable optical depth and focus transitions without synthetic blur edges or uniformly sharp depth. |
 | `photo.material-response` | Skin or materials risk plastic rendering | Preserve material-specific roughness, translucency, reflections, and microtexture instead of applying one glossy or waxy surface treatment. |
@@ -62,6 +64,7 @@ Add selected clauses under `## Visual Integrity` after photographic treatment. D
 ## Preflight checklist
 
 - [ ] The target role is genuinely photographic or photoreal.
+- [ ] Clean fidelity and studio lighting are selected only when compatible with the requested scene and role.
 - [ ] Lighting, optics, materials, and color describe one compatible physical result.
 - [ ] Grain is omitted unless requested or clearly required by the declared medium.
 - [ ] Skin and materials retain plausible variation without invented dirt.

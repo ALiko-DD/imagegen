@@ -9,6 +9,7 @@ Reduce collateral reconstruction and accumulated degradation during reference-im
 - An existing raster image must be modified, preserved, replaced, removed, or composited.
 - The request uses the `reference-image-edit` structure family.
 - A previous generated result is being corrected.
+- Existing text, logos, labels, or fine graphics must remain on a smooth product or photographic surface.
 
 ## Do not apply when
 
@@ -48,6 +49,8 @@ Use this order:
 
 Prefer one cumulative, narrowly scoped edit over a chain of defect-by-defect edits when the corrections are compatible. If only a previously generated result is available, disclose the degradation risk and do not claim lossless preservation.
 
+When exact text or a logo must remain unchanged, prefer retaining the original source pixels for the complete printed region and its immediate surrounding surface. Re-render that region only when the requested geometry, viewpoint, lighting, occlusion, or edit makes source-pixel retention impossible. If an authoritative logo or label asset is supplied and exact fidelity is mandatory, prefer compositing that asset after generation over model redrawing when the available workflow supports it; never fabricate an asset.
+
 ## Conflicts and exceptions
 
 - Derive `Allowed changes` before defining preservation.
@@ -68,6 +71,8 @@ Prefer one cumulative, narrowly scoped edit over a chain of defect-by-defect edi
 | `edit.artifact-cleanup` | Structured contamination is the target | Remove only the named contamination in the affected region while preserving legitimate material texture, fine edges, text, geometry, and natural tonal variation. |
 | `edit.global-transformation` | The user requests broad change | Apply the requested global transformation while preserving only the explicitly named identity, text, logo, geometry, layout, composition, or product anchors. |
 | `edit.no-new-contamination` | Any edit may add artifacts | Introduce no new tiled, checkerboard, ripple-like, grime-like, blocky, haloed, or chromatically speckled artifacts. |
+| `edit.protect-printed-region` | Existing printing must survive an edit | Treat each declared text or logo region and its immediate supporting surface as a protected unit: preserve stroke geometry and keep the neighboring material field smooth, with no redraw drift, echo contours, ripple bands, halos, or local texture buildup. |
+| `edit.preserve-source-pixels` | Exact unchanged printing can remain in place | Retain original source pixels for the complete printed region and its immediate surrounding surface; do not reconstruct, relight, sharpen, denoise, or resynthesize that protected unit. |
 
 ## Native-format insertion
 
@@ -91,5 +96,6 @@ Place selected clauses under `## Edit Integrity` after edit operations and prese
 - [ ] Allowed changes are defined before preservation.
 - [ ] The named cleanup target is not accidentally preserved.
 - [ ] Legitimate texture, natural grain, text, geometry, and identity anchors remain protected when required.
+- [ ] Exact printing uses source-pixel retention when compatible; otherwise the Prompt explicitly protects both strokes and neighboring surface.
 - [ ] The Prompt does not claim a mask or preservation instruction guarantees unchanged pixels.
 - [ ] A repeated-edit risk is reported instead of hidden.

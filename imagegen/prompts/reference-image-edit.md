@@ -18,6 +18,7 @@ Use to modify one or more input images through movement, removal, replacement, a
 - Edit mode: constrained edit, artifact cleanup, or global transformation.
 - Cleanest available source: original, approved baseline, or least-degraded valid result.
 - Identity, packaging, text, geometry, camera, background, and lighting invariants.
+- For text-bearing surfaces: printed-stroke boundaries, immediate surrounding material field, and whether original pixels or an authoritative asset can be retained.
 - Output ratio, format, and comparison criteria.
 
 ## Default native format
@@ -48,6 +49,7 @@ Do not include: <drift, extra edits, or incorrect text>.
 - Do not treat every input image as an edit target.
 - Keep preservation and change instructions mutually consistent.
 - Record exact text, logos, and packaging elements verbatim.
+- Treat each exact text or logo region together with its immediate supporting surface; preserving glyph content alone does not protect against ringing around it.
 - Define face, silhouette, proportion, clothing, or product-geometry anchors for identity preservation.
 - During artifact cleanup, exclude the named contamination from preservation while retaining legitimate texture and intended grain.
 - During global transformation, preserve only explicitly required anchors instead of claiming every pixel remains unchanged.
@@ -58,9 +60,12 @@ Do not include: <drift, extra edits, or incorrect text>.
 - Separate preserve, remove, replace, add, and allowed-change instructions.
 - Read [edit-integrity.md](visual-noise-control/edit-integrity.md) and select only clauses matching the edit mode.
 - Prefer the original or an approved clean baseline over successive generated results.
+- When the requested edit permits it, preserve original pixels for complete label or logo regions instead of asking the model to redraw them.
+- If label planes must be resynthesized, keep them sufficiently large and near front-facing, then apply `clean.single-edge-graphics`, `clean.graphic-neighborhood`, and `edit.protect-printed-region`.
 - Combine compatible corrections into one narrowly scoped cumulative edit when possible.
 - Do not use a failed or visibly degraded output as a new reference unless no cleaner source exists or the user explicitly selects it.
 - Report degradation risk when only a prior generated result is available.
+- If exact brand artwork is mandatory and an authoritative asset exists, report compositing that asset after generation as more reliable than model redrawing; do not create or substitute unsupplied artwork.
 - Load only modifiers needed for the target visual result; do not load a second structure template.
 
 ## Verbatim source Prompt examples

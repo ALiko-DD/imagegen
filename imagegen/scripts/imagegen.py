@@ -32,6 +32,7 @@ RECOMMENDED_PROMPT_CHARACTERS = {"min": 200, "max": 4_000}
 MAX_INPUT_IMAGES = 16
 MAX_INPUT_BYTES = 50 * 1024 * 1024
 REQUEST_TIMEOUT_SECONDS = 600
+SUPPORTED_REASONING_EFFORTS = ("high", "xhigh", "max")
 SUPPORTED_SIZES = {
     "auto",
     "1024x1024",
@@ -41,8 +42,27 @@ SUPPORTED_SIZES = {
     "1672x941",
 }
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
-SCRIPT_DIR = Path(__file__).resolve().parent
-FIXTURE_DIR = SCRIPT_DIR / "tests" / "fixtures"
+SELF_TEST_CONFIG = "\n".join(
+    [
+        'model_provider = "vendor"',
+        "",
+        "[model_providers.vendor]",
+        'base_url = "https://example.invalid/api"',
+        'experimental_bearer_token = "fixture-token"',
+    ]
+)
+SELF_TEST_CONFIG_MISSING_TOKEN = "\n".join(
+    [
+        'model_provider = "vendor"',
+        "",
+        "[model_providers.vendor]",
+        'base_url = "https://example.invalid/api"',
+    ]
+)
+SELF_TEST_PNG_BASE64 = (
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/"
+    "ScL4WQAAAABJRU5ErkJggg=="
+)
 
 
 class SkillError(Exception):
@@ -53,11 +73,13 @@ class SkillError(Exception):
         *,
         retryable: bool = False,
         response_headers: Optional[Any] = None,
+        network_request_performed: bool = False,
     ) -> None:
         super().__init__(message)
         self.code = code
         self.retryable = retryable
         self.response_headers = response_headers
+        self.network_request_performed = network_request_performed
 
 
 def fail(code: str, message: str, *, retryable: bool = False) -> None:
@@ -106,6 +128,11 @@ def build_parser() -> argparse.ArgumentParser:
     for command in ("generate", "edit"):
         operation = subparsers.add_parser(command)
         operation.add_argument("--prompt-file", required=True)
+        operation.add_argument(
+            "--reasoning-effort",
+            choices=SUPPORTED_REASONING_EFFORTS,
+            help="Optional requested reasoning effort; omitted by default.",
+        )
         operation.add_argument("--size", choices=sorted(SUPPORTED_SIZES), default="auto")
         operation.add_argument("--out")
         operation.add_argument("--out-dir")
@@ -385,6 +412,7 @@ def build_payload(
     mode: str,
     size: str,
     images: Sequence[Dict[str, Any]],
+    reasoning_effort: Optional[str] = None,
 ) -> Dict[str, Any]:
     tool: Dict[str, Any] = {
         "type": "image_generation",
@@ -407,7 +435,7 @@ def build_payload(
             "text": prompt_text,
         }
     )
-    return {
+    payload: Dict[str, Any] = {
         "model": MODEL,
         "store": False,
         "stream": True,
@@ -422,6 +450,9 @@ def build_payload(
             }
         ],
     }
+    if reasoning_effort is not None:
+        payload["reasoning"] = {"effort": reasoning_effort}
+    return payload
 
 
 def request_summary(payload: Dict[str, Any], mode: str) -> Dict[str, Any]:
@@ -433,6 +464,7 @@ def request_summary(payload: Dict[str, Any], mode: str) -> Dict[str, Any]:
         "stream": payload["stream"],
         "tool": payload["tools"][0],
         "tool_choice": payload["tool_choice"],
+        "requested_reasoning_effort": payload.get("reasoning", {}).get("effort"),
         "endpoint_path": ENDPOINT_PATH,
         "mode": mode,
         "input_types": [item["type"] for item in content],
@@ -712,6 +744,25 @@ def classify_request_failure(error: BaseException) -> Tuple[str, bool]:
     return f"Image request failed: {safe_text(error)}", True
 
 
+def get_reasoning_rejection_message(
+    status: int,
+    body: str,
+    payload: Dict[str, Any],
+) -> Optional[str]:
+    reasoning = payload.get("reasoning")
+    requested_reasoning_effort = (
+        reasoning.get("effort") if isinstance(reasoning, dict) else None
+    )
+    if not requested_reasoning_effort or status not in (400, 422):
+        return None
+    return (
+        "Provider rejected a request that included "
+        f'reasoning.effort="{requested_reasoning_effort}". The Skill did not remove '
+        "or downgrade it; the upstream model/tool combination may not support it. "
+        f"HTTP {status}. {body}"
+    )
+
+
 def request_once(config: Dict[str, str], payload: Dict[str, Any]) -> Dict[str, Any]:
     endpoint = config["base_url"] + ENDPOINT_PATH
     request = urllib.request.Request(
@@ -737,6 +788,7 @@ def request_once(config: Dict[str, str], payload: Dict[str, Any]) -> Dict[str, A
             raise SkillError(
                 "E_AUTH",
                 f"Provider authentication failed with HTTP {error.code}. {body}",
+                network_request_performed=True,
             )
         if error.code == 429:
             raise SkillError(
@@ -744,6 +796,7 @@ def request_once(config: Dict[str, str], payload: Dict[str, Any]) -> Dict[str, A
                 f"Provider rate limit returned HTTP 429. {body}",
                 retryable=True,
                 response_headers=error.headers,
+                network_request_performed=True,
             )
         if error.code == 408 or error.code >= 500:
             raise SkillError(
@@ -751,14 +804,31 @@ def request_once(config: Dict[str, str], payload: Dict[str, Any]) -> Dict[str, A
                 f"Provider returned HTTP {error.code}. {body}",
                 retryable=True,
                 response_headers=error.headers,
+                network_request_performed=True,
             )
-        raise SkillError("E_HTTP", f"Provider returned HTTP {error.code}. {body}")
+        reasoning_rejection = get_reasoning_rejection_message(
+            error.code,
+            body,
+            payload,
+        )
+        if reasoning_rejection:
+            raise SkillError(
+                "E_HTTP",
+                reasoning_rejection,
+                network_request_performed=True,
+            )
+        raise SkillError(
+            "E_HTTP",
+            f"Provider returned HTTP {error.code}. {body}",
+            network_request_performed=True,
+        )
     except (urllib.error.URLError, TimeoutError, OSError) as error:
         message, retryable = classify_request_failure(error)
         raise SkillError(
             "E_HTTP",
             message,
             retryable=retryable,
+            network_request_performed=True,
         )
 
 
@@ -803,6 +873,11 @@ def run_preflight(args: argparse.Namespace) -> Dict[str, Any]:
             "strict_utf8_decoder": True,
         },
         "model": MODEL,
+        "reasoning_effort": {
+            "supported_values": list(SUPPORTED_REASONING_EFFORTS),
+            "default": None,
+            "default_behavior": "No reasoning field is sent unless --reasoning-effort is explicit.",
+        },
         "output_directory": str(output_directory),
         "network_request_performed": False,
         "warnings": [],
@@ -844,7 +919,13 @@ def run_generate_or_edit(args: argparse.Namespace) -> Dict[str, Any]:
     prompt = read_prompt(args.prompt_file, mode)
     config = read_config()
     images = load_input_images(args.image) if mode == "edit" else []
-    payload = build_payload(prompt["text"], mode, args.size, images)
+    payload = build_payload(
+        prompt["text"],
+        mode,
+        args.size,
+        images,
+        args.reasoning_effort,
+    )
     summary = request_summary(payload, mode)
     output_path = resolve_output_path(args)
     ensure_writable_directory(output_path.parent)
@@ -857,6 +938,7 @@ def run_generate_or_edit(args: argparse.Namespace) -> Dict[str, Any]:
             "command": mode,
             "runtime": "python",
             "model": MODEL,
+            "requested_reasoning_effort": args.reasoning_effort,
             "prompt_file": prompt["prompt_file"],
             "prompt_characters": prompt["characters"],
             "output_path": str(output_path),
@@ -879,6 +961,7 @@ def run_generate_or_edit(args: argparse.Namespace) -> Dict[str, Any]:
         "command": mode,
         "runtime": "python",
         "model": MODEL,
+        "requested_reasoning_effort": args.reasoning_effort,
         "output_path": str(output_path),
         "width": written["width"],
         "height": written["height"],
@@ -909,10 +992,6 @@ def run_verify(args: argparse.Namespace) -> Dict[str, Any]:
     }
 
 
-def read_fixture(name: str) -> str:
-    return (FIXTURE_DIR / name).read_text(encoding="utf-8")
-
-
 def assert_test(condition: bool, message: str) -> None:
     if not condition:
         raise AssertionError(message)
@@ -921,7 +1000,7 @@ def assert_test(condition: bool, message: str) -> None:
 def run_self_test() -> Dict[str, Any]:
     tests: List[str] = []
 
-    config = parse_config_text(read_fixture("config-valid.toml"))
+    config = parse_config_text(SELF_TEST_CONFIG)
     assert_test(config["provider"] == "vendor", "provider mismatch")
     assert_test(config["base_url"] == "https://example.invalid/api", "base URL mismatch")
     assert_test(config["token"] == "fixture-token", "token mismatch")
@@ -929,7 +1008,7 @@ def run_self_test() -> Dict[str, Any]:
 
     code = None
     try:
-        parse_config_text(read_fixture("config-missing-token.toml"))
+        parse_config_text(SELF_TEST_CONFIG_MISSING_TOKEN)
     except SkillError as error:
         code = error.code
     assert_test(code == "E_CONFIG_KEY", "missing token should be E_CONFIG_KEY")
@@ -979,39 +1058,127 @@ def run_self_test() -> Dict[str, Any]:
     assert_test(code == "E_PROMPT_STRUCTURE", "placeholder should be E_PROMPT_STRUCTURE")
     tests.append("prompt-placeholder-rejection")
 
-    png_base64 = read_fixture("png-1x1.b64").strip()
+    png_base64 = SELF_TEST_PNG_BASE64
     png_result = verify_png_bytes(decode_base64_strict(png_base64))
     assert_test(png_result["width"] == 1 and png_result["height"] == 1, "PNG mismatch")
     tests.append("png-validation")
 
-    final_sse = read_fixture("sse-final.txt").replace("__PNG_BASE64__", png_base64)
+    final_sse = "\n".join(
+        [
+            f'data: {{"type":"response.image_generation_call.partial_image","partial_image_b64":"{png_base64}"}}',
+            "",
+            f'data: {{"type":"response.output_item.done","item":{{"id":"ig_1","type":"image_generation_call","result":"{png_base64}"}}}}',
+            "",
+            "data: [DONE]",
+        ]
+    )
     final_result = parse_sse_text(final_sse)
     assert_test(final_result["source"] == "item.result", "final result should win")
     tests.append("sse-final-priority")
 
-    partial_sse = read_fixture("sse-partial.txt").replace("__PNG_BASE64__", png_base64)
+    partial_sse = "\n".join(
+        [
+            f'data: {{"type":"response.image_generation_call.partial_image","partial_image_b64":"{png_base64}"}}',
+            "",
+            "data: [DONE]",
+        ]
+    )
     partial_result = parse_sse_text(partial_sse)
     assert_test(partial_result["source"] == "partial_image_b64", "partial mismatch")
     tests.append("sse-partial-fallback")
 
     code = None
     try:
-        parse_sse_text(read_fixture("sse-malformed.txt"))
+        parse_sse_text("data: {invalid-json}\n")
     except SkillError as error:
         code = error.code
     assert_test(code == "E_SSE", "malformed SSE should be E_SSE")
     tests.append("sse-malformed")
 
-    image = {"data_url": f"data:image/png;base64,{png_base64}"}
-    generate = build_payload(sample_prompt, "generate", "1024x1024", [])
-    edit = build_payload(sample_prompt, "edit", "auto", [image, image])
-    assert_test(generate["model"] == MODEL, "model mismatch")
-    assert_test(generate["tools"][0]["size"] == "1024x1024", "size mismatch")
+    parser = build_parser()
+    parsed = parser.parse_args(
+        [
+            "generate",
+            "--prompt-file",
+            "prompt.txt",
+            "--reasoning-effort",
+            "xhigh",
+            "--dry-run",
+        ]
+    )
+    assert_test(parsed.reasoning_effort == "xhigh", "xhigh argument mismatch")
+    invalid_code = None
+    try:
+        parser.parse_args(
+            [
+                "generate",
+                "--prompt-file",
+                "prompt.txt",
+                "--reasoning-effort",
+                "turbo",
+            ]
+        )
+    except SkillError as error:
+        invalid_code = error.code
+    assert_test(invalid_code == "E_RUNTIME", "invalid reasoning effort should fail locally")
+    tests.append("reasoning-effort-arguments")
+
+    reasoning_message = get_reasoning_rejection_message(
+        422,
+        "unsupported",
+        {"reasoning": {"effort": "xhigh"}},
+    )
     assert_test(
-        sum(item["type"] == "input_image" for item in edit["input"][0]["content"]) == 2,
+        reasoning_message is not None and 'reasoning.effort="xhigh"' in reasoning_message,
+        "reasoning rejection must name the requested effort",
+    )
+    assert_test(
+        get_reasoning_rejection_message(
+            503,
+            "unavailable",
+            {"reasoning": {"effort": "max"}},
+        )
+        is None,
+        "transient failures must not be mislabeled as reasoning incompatibility",
+    )
+    assert_test(
+        get_reasoning_rejection_message(400, "bad request", {}) is None,
+        "requests without reasoning must not receive a reasoning diagnostic",
+    )
+    tests.append("reasoning-rejection-diagnostic")
+
+    image = {"data_url": f"data:image/png;base64,{png_base64}"}
+    default_generate = build_payload(sample_prompt, "generate", "1024x1024", [])
+    xhigh_generate = build_payload(
+        sample_prompt,
+        "generate",
+        "1024x1024",
+        [],
+        "xhigh",
+    )
+    max_edit = build_payload(sample_prompt, "edit", "auto", [image, image], "max")
+    assert_test(default_generate["model"] == MODEL, "model mismatch")
+    assert_test("reasoning" not in default_generate, "default must omit reasoning")
+    assert_test(default_generate["tools"][0]["quality"] == "high", "image quality mismatch")
+    assert_test(default_generate["tools"][0]["size"] == "1024x1024", "size mismatch")
+    assert_test(
+        xhigh_generate["reasoning"]["effort"] == "xhigh",
+        "xhigh reasoning payload mismatch",
+    )
+    assert_test(
+        request_summary(xhigh_generate, "generate")["requested_reasoning_effort"] == "xhigh",
+        "xhigh reasoning summary mismatch",
+    )
+    assert_test(max_edit["reasoning"]["effort"] == "max", "max reasoning payload mismatch")
+    assert_test(
+        sum(item["type"] == "input_image" for item in max_edit["input"][0]["content"])
+        == 2,
         "edit image order mismatch",
     )
-    assert_test(edit["input"][0]["content"][-1]["type"] == "input_text", "text order mismatch")
+    assert_test(
+        max_edit["input"][0]["content"][-1]["type"] == "input_text",
+        "text order mismatch",
+    )
     tests.append("request-shape")
 
     assert_test(REQUEST_TIMEOUT_SECONDS == 600, "request timeout must be 600 seconds")
@@ -1067,7 +1234,7 @@ def main() -> int:
                 "runtime": "python",
                 "code": error.code,
                 "message": safe_text(error),
-                "network_request_performed": False,
+                "network_request_performed": error.network_request_performed,
             }
         )
         return 1

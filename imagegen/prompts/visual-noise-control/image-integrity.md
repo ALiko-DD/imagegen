@@ -35,6 +35,7 @@ Do not treat legitimate brick, fabric, paper, canvas, packaging patterns, or mat
 
 | ID | Select when | English clause |
 | --- | --- | --- |
+| `integrity.low-digital-noise` | A clean high-fidelity raster result is required | Render with low digital noise and stable fine detail, without chromatic speckles, random pixel contamination, or compression-like residue. |
 | `integrity.tonal-continuity` | Gradients, shadows, skies, skin, or smooth surfaces matter | Preserve clean, continuous tonal transitions without ripple-like bands, block boundaries, or dirty overlays. |
 | `integrity.material-coherence` | Surfaces need believable texture | Keep every surface texture coherent with its material, scale, lighting, and viewing distance. |
 | `integrity.detail-falloff` | The image risks uniform over-detail | Concentrate resolved detail on the primary subject and allow natural detail falloff in secondary regions. |
@@ -61,6 +62,7 @@ Place selected clauses under `## Visual Integrity` only when the Prompt already 
 ## Preflight checklist
 
 - [ ] Every selected clause targets a plausible failure for this image.
+- [ ] Low-noise wording suppresses digital contamination without erasing legitimate material texture.
 - [ ] Requested texture and legitimate material repetition remain allowed.
 - [ ] Natural grain has not been confused with structured contamination.
 - [ ] No clause duplicates an existing task-specific negative constraint.

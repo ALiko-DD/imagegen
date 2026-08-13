@@ -9,12 +9,11 @@ Create one validated PNG or stage a multi-output request without forcing every P
 
 Resolve this file's directory as `<skill-dir>`. Load references progressively:
 
-1. Load [request-diagnosis.md](references/request-diagnosis.md) only when the diagnosis gate triggers.
-2. Route to one structure template.
-3. Load [visual-noise-control/INDEX.md](prompts/visual-noise-control/INDEX.md), then only applicable control files.
-4. Load [modifiers/INDEX.md](prompts/modifiers/INDEX.md) only when visual refinements are needed.
-5. Load [prompt-system.md](references/prompt-system.md) only for boundary, format, or provenance questions.
-6. Load [runtime-contract.md](references/runtime-contract.md) before script execution.
+1. Route to one structure template.
+2. Load [visual-noise-control/INDEX.md](prompts/visual-noise-control/INDEX.md), then only applicable control files.
+3. Load [modifiers/INDEX.md](prompts/modifiers/INDEX.md) only when visual refinements are needed.
+4. Load [prompt-system.md](references/prompt-system.md) only for boundary, format, or provenance questions.
+5. Load [runtime-contract.md](references/runtime-contract.md) before script execution.
 
 ## Non-negotiable rules
 
@@ -32,54 +31,11 @@ Resolve this file's directory as `<skill-dir>`. Load references progressively:
 
 ## Workflow
 
-### 1. Choose the diagnosis path
+### 1. Diagnose the request and create the Prompt
 
-Classify the request as generation, reference-image editing, or multiple outputs.
+The main agent owns the whole pre-generation pass. Do not delegate request diagnosis, extraction, family selection, Prompt writing, or Prompt review to subagents.
 
-Use the direct path only when every condition is true:
-
-- one output, one operation, and one clear central subject or artifact;
-- no attachment or reference image;
-- no material ambiguity or conflict;
-- no missing fact would require invention.
-
-Trigger diagnosis when any hard trigger exists:
-
-- an attachment, reference image, or edit target affects the result;
-- multiple outputs, stages, or dependent results are required;
-- the goal, attachment role, or edit scope has materially different interpretations;
-- explicit requirements conflict.
-
-Also trigger diagnosis when at least two signals exist:
-
-- exact visible text, facts, values, prices, or counts;
-- coupled layout, reading order, component, or spatial constraints;
-- preservation, modification, and prohibition boundaries;
-- brand, identity, product, packaging, or cross-output consistency.
-
-Do not decide from request length, keyword count, adjective count, or a subjective score.
-
-**Complete when:** the request is assigned to the direct path or the diagnostic path from observable conditions.
-
-### 2. Run two independent diagnoses when required
-
-Read [request-diagnosis.md](references/request-diagnosis.md). Build one source package from verbatim user messages and original attachments in their original order.
-
-- Send the same immutable source package and neutral instruction to exactly two fresh, isolated subagents in parallel.
-- Use matching inherited model settings when supported.
-- Give neither agent a role, summary, preliminary interpretation, candidate family, candidate Prompt, or the other output.
-- Validate every claim against the original source package.
-- Keep supported agreement and supported complementary findings.
-- Resolve disagreement from source evidence. Do not vote, average confidence, or add a third judge.
-- Remove unsupported assumptions even when both agents agree.
-- Follow the reference degradation rules when equal dispatch or attachment access fails.
-- Ask one minimal clarification only for unresolved blocking ambiguity.
-
-**Complete when:** a source-backed evidence ledger exists, or the documented degradation path has produced an equivalent main-agent diagnosis.
-
-### 3. Extract the request contract
-
-Extract from the original user material:
+Classify the task as generation, reference-image editing, or multiple outputs. Inspect the original user messages and every original attachment in order, then extract:
 
 - use, audience, final artifact, and output count;
 - subject, scene, action, hierarchy, and reading order;
@@ -88,13 +44,14 @@ Extract from the original user material:
 - width, height, ratio, orientation, file expectations, and transparency;
 - required elements, optional elements, and prohibitions;
 - rendering mode, cleanliness target, intentional grain or texture, and contamination-cleanup target;
+- whether high-contrast text, logos, labels, or fine graphics occupy smooth photographic surfaces and require neighborhood protection;
 - for editing: input order, image roles, allowed changes, preservation anchors, edit mode, and the cleanest valid source.
 
-Do not fill unknown facts with plausible content. If the user supplies only an aspect ratio, preserve the ratio and leave pixel dimensions unspecified; do not derive a resolution or filename. Ask only when a missing item changes the subject, exact content, attachment role, edit scope, output count, or core layout.
+Do not fill unknown facts with plausible content. Resolve requirements from source evidence rather than request length, keyword count, adjective count, or voting. If the user supplies only an aspect ratio, preserve the ratio and leave pixel dimensions unspecified; do not derive a resolution or filename. Ask one minimal clarification only when an unresolved issue changes the subject, exact content, attachment role, edit scope, output count, or core layout. Leave nonblocking preferences unspecified.
 
-**Complete when:** every explicit value is recorded once, unknowns are either nonblocking or clarified, and no invented fact enters the contract.
+Complete the routing, writing, and review actions below within this same main-agent pass. Do not create an intermediate diagnosis file unless the user explicitly asks for one.
 
-### 4. Select one structure family
+#### Select one structure family
 
 Apply precedence before ordinary routing:
 
@@ -123,7 +80,7 @@ Use [prompt-system.md](references/prompt-system.md) only when adjacent families 
 
 **Complete when:** exactly one template is loaded, or the edit-plus-series request is explicitly separated into two stages.
 
-### 5. Write the native-format Prompt
+#### Write the native-format Prompt
 
 Use the selected template's required fields, default format, valid skeleton, writing guidance, and checklist. Never copy its raw examples into the user's Prompt.
 
@@ -131,16 +88,20 @@ Then:
 
 1. Declare visual roles, regions, surfaces, edit targets, preservation anchors, and intentional texture exceptions.
 2. Select a control stack from [visual-noise-control/INDEX.md](prompts/visual-noise-control/INDEX.md).
-3. Add only controls relevant to likely failure modes and scope mixed photographic and graphic treatments.
-4. Load only modifier dimensions that materially change the result.
-5. Prefer positive observable behavior, then a short targeted exclusion list.
-6. Express each semantic requirement once.
+3. For photographic, photoreal product, and photoreal reference-image edit tasks, insert this exact sentence once while first composing the Prompt file: `clean image, smooth surfaces, minimal texture, low noise, high resolution, crisp details, sharp focus, studio lighting, photorealistic, no film grain`. Do not translate, paraphrase, reorder, split, capitalize, or duplicate it. Place it in the visual-treatment or rendering content immediately before the selected visual-noise controls. In JSON, preserve it as one complete string in the applicable rendering field or `visual_integrity.global`; in prose or Markdown, preserve it as one standalone rendering-quality line. This required sentence is the sole exception to the fixed quality-keyword-stack prohibition. Do not append it in a second edit after the Prompt file has been created.
+4. Do not insert that sentence into UI, diagrams, flat graphics, anime, painting, or other non-photographic tasks unless the user explicitly requests the complete sentence. Resolve an explicit same-role requirement for grain, heavy texture, or a non-studio medium before writing the Prompt.
+5. Apply the index's conditional clean-fidelity recipe in addition to the exact sentence; the sentence does not replace scoped material, noise, or text-neighborhood controls.
+6. When text or logos sit on smooth photographic surfaces, apply the index's text-neighborhood safeguard; for edits, prefer protected original source pixels over model redrawing when compatible.
+7. Add only controls relevant to likely failure modes and scope mixed photographic and graphic treatments.
+8. Load only modifier dimensions that materially change the result.
+9. Prefer positive observable behavior, then a short targeted exclusion list.
+10. Express each semantic requirement once.
 
 Preserve the chosen JSON, prose, or Markdown format. Do not append prose after JSON or convert formats solely to insert controls. Save the complete Prompt to a UTF-8 file; do not execute documentation or example blocks.
 
 **Complete when:** one executable Prompt file preserves the request contract, follows one template, contains only applicable controls, and remains valid in its native format.
 
-### 6. Perform semantic and structural review
+#### Review and save the Prompt
 
 Verify:
 
@@ -149,6 +110,9 @@ Verify:
 - panels, components, routes, callouts, roles, and edit references resolve;
 - preservation boundaries and allowed changes are explicit and compatible;
 - intentional texture is not removed by cleanliness controls;
+- every applicable photographic Prompt contains the exact required quality sentence once in its initial saved version and in the correct rendering location;
+- clean-fidelity clauses are compatible with the medium, lighting, focus, materials, and named scope rather than copied as a generic booster stack;
+- text-bearing smooth surfaces separately protect printed strokes and the immediate supporting material field, without aggressive local sharpening;
 - visual controls and modifiers are scoped, dependency-complete, conflict-free, and nonduplicative;
 - orientation is preserved; use `auto` when no supported size maps clearly;
 - selected JSON parses and every placeholder is resolved.
@@ -161,9 +125,22 @@ Run the selected runtime's local check:
 
 `prompt-check` is structural validation only and never replaces the semantic review above.
 
-**Complete when:** semantic review passes and `prompt-check` returns success with `semantic_review_required: true`.
+**Complete when:** every explicit value is represented once, blocking issues are resolved, no unsupported assumption enters the saved Prompt, semantic review passes, and `prompt-check` returns success with `semantic_review_required: true`.
 
-### 7. Execute one authorized pass
+### 2. Choose optional reasoning effort
+
+Leave `--reasoning-effort` absent for ordinary generation. The absent default intentionally sends no `reasoning` field.
+
+- Use `xhigh` for complex reference-image edits, strict multi-region layouts, dense exact-copy requirements, or coupled visual constraints where planning the image-tool call is materially useful.
+- Use `max` only for unusually complex coupled requirements and only after the configured model and image tool have passed a controlled live compatibility check. Never make `max` the default.
+- `quality: high` belongs to the image-generation tool and is independent from reasoning effort.
+- Do not inspect API Key settings, infer an allowed ceiling, change `Originator` or `User-Agent`, or select a different route to obtain a higher reasoning level.
+- The runtime reports `requested_reasoning_effort`; it must not claim the final upstream effort, because an authenticated gateway may cap it.
+- If an explicit reasoning request receives HTTP 400 or 422, report the incompatibility and stop the pass. Do not silently remove, downgrade, or retry without the requested field.
+
+**Complete when:** the invocation either omits reasoning deliberately or contains one source-backed explicit value from `high`, `xhigh`, or `max`.
+
+### 3. Execute one authorized pass
 
 Use a built-in image tool only when the current session exposes a callable image-generation tool. Do not infer availability from configuration flags, `tools/list`, cached Schemas, or provider claims.
 
@@ -175,8 +152,8 @@ Read [runtime-contract.md](references/runtime-contract.md), select the runtime o
 
 ```text
 <runtime> "<skill-dir>/scripts/imagegen.<ext>" preflight
-<runtime> "<skill-dir>/scripts/imagegen.<ext>" generate --prompt-file "<prompt-file>" --size "<size>" --out-dir "<outputs>"
-<runtime> "<skill-dir>/scripts/imagegen.<ext>" edit --prompt-file "<prompt-file>" --image "<image-1>" --size "<size>" --out-dir "<outputs>"
+<runtime> "<skill-dir>/scripts/imagegen.<ext>" generate --prompt-file "<prompt-file>" [--reasoning-effort high|xhigh|max] --size "<size>" --out-dir "<outputs>"
+<runtime> "<skill-dir>/scripts/imagegen.<ext>" edit --prompt-file "<prompt-file>" --image "<image-1>" [--reasoning-effort high|xhigh|max] --size "<size>" --out-dir "<outputs>"
 ```
 
 Launch exactly one `generate` or `edit` command per user-authorized pass with `timeout_ms: 660000` or greater. The runtime owns the sole technical retry. After command failure, stop the pass. Do not automatically rerun the command, switch runtimes, revise the Prompt, or attempt another fallback within the same pass.
@@ -187,7 +164,7 @@ Use `--dry-run` only for local request-shape validation. A dry run or fixture is
 
 **Complete when:** one authorized command has returned a validated candidate path or a final actionable error without an agent-level rerun.
 
-### 8. Verify, inspect, report, and stop
+### 4. Verify, report, and stop
 
 Run:
 
@@ -195,31 +172,28 @@ Run:
 <runtime> "<skill-dir>/scripts/imagegen.<ext>" verify --file "<output.png>"
 ```
 
-Confirm that the file exists, has a valid PNG signature and dimensions, and is not merely a dry-run or fixture result. When visual inspection is available, inspect normal view and enlarged detail.
+Confirm only that the file exists, has a valid PNG signature and dimensions, and is not merely a dry-run or fixture result. Do not perform routine visual inspection, enlarged-detail inspection, text-neighborhood inspection, or artifact-by-artifact review after generation unless the user explicitly asks for visual quality review.
 
 Report:
 
 - absolute output path, actual width and height, and execution route;
 - whether the runtime performed its internal technical retry;
 - the experimental-edit limitation when applicable;
-- visible tiling, ripple, grime, blocks, speckles, halos, synthetic material response, or collateral edits;
 - unresolved limitations.
 
-Report visible contamination honestly and without automatically generating another pass. Do not claim artifact-free output, lossless editing, or success when the file is missing or invalid.
+Do not claim artifact-free output or lossless editing when no visual review was requested. Do not claim success when the file is missing or invalid.
 
 Stop after the authorized pass. Generate again only after an explicit user request.
 
-**Complete when:** the PNG is structurally valid, visual limitations are reported, and no unrequested pass is started.
+**Complete when:** the PNG is structurally valid, the minimal result summary is reported, and no unrequested pass is started.
 
 ## Maintenance validation
 
 Run without a real image API request:
 
 ```text
-node "<skill-dir>/scripts/tests/corpus-audit.mjs"
 node "<skill-dir>/scripts/imagegen.mjs" self-test
 python "<skill-dir>/scripts/imagegen.py" self-test
-node "<skill-dir>/scripts/tests/offline-tests.mjs"
 ```
 
-Run the `skill-creator` quick validator after structural changes.
+The self-tests use inline deterministic data and do not require or create a `tests` directory. Run the `skill-creator` quick validator after structural changes when it is available.
