@@ -5,7 +5,7 @@ description: Generate or experimentally edit raster images with source-audited n
 
 # ImageGen
 
-Create one validated PNG or stage a multi-output request without forcing every Prompt into Markdown.
+Create validated PNGs or stage a multi-output request without forcing every Prompt into Markdown.
 
 Resolve this file's directory as `<skill-dir>`. Load references progressively:
 
@@ -117,6 +117,8 @@ Verify:
 - orientation is preserved; use `auto` when no supported size maps clearly;
 - selected JSON parses and every placeholder is resolved.
 
+For one output, save and check one Prompt. For two or more independent outputs, finish every Prompt file first, assign every output a stable job ID and a unique explicit `.png` path, then run the local check for every Prompt before launching any image job. Do not delegate Prompt writing or review. Do not start generation while a later Prompt remains unchecked.
+
 Run the selected runtime's local check:
 
 ```text
@@ -125,7 +127,7 @@ Run the selected runtime's local check:
 
 `prompt-check` is structural validation only and never replaces the semantic review above.
 
-**Complete when:** every explicit value is represented once, blocking issues are resolved, no unsupported assumption enters the saved Prompt, semantic review passes, and `prompt-check` returns success with `semantic_review_required: true`.
+**Complete when:** every explicit value is represented once, blocking issues are resolved, no unsupported assumption enters the saved Prompt, semantic review passes, every independent Prompt is saved, every planned output path is unique and absent, and each `prompt-check` returns success with `semantic_review_required: true`.
 
 ### 2. Choose optional reasoning effort
 
@@ -156,13 +158,28 @@ Read [runtime-contract.md](references/runtime-contract.md), select the runtime o
 <runtime> "<skill-dir>/scripts/imagegen.<ext>" edit --prompt-file "<prompt-file>" --image "<image-1>" [--reasoning-effort high|xhigh|max] --size "<size>" --out-dir "<outputs>"
 ```
 
-Launch exactly one `generate` or `edit` command per user-authorized pass with `timeout_ms: 660000` or greater. The runtime owns the sole technical retry. After command failure, stop the pass. Do not automatically rerun the command, switch runtimes, revise the Prompt, or attempt another fallback within the same pass.
+For one requested image, launch exactly one foreground `generate` or `edit` command with `timeout_ms: 660000` or greater. The runtime owns the sole technical retry. After command failure, stop the pass. Do not automatically rerun the command, switch runtimes, revise the Prompt, or attempt another fallback within the same pass.
 
-If a follow-up arrives while a `generate` or `edit` command may still be running, treat it as a status inquiry, not a new pass. A missing PNG or missing final JSON is not evidence that the API returned no image. Reconcile the original command, terminal, and process state first. Declare failure only after the original process has ended with a final runtime error. If its state cannot be confirmed, report the result as unknown. Never launch a replacement command.
+For two or more independent requested images, one user-authorized pass may contain multiple independent jobs. Before launching, create a job ledger containing each unique job ID, checked Prompt path, ordered edit-input paths, unique explicit output path, mode, size, reasoning choice, state `not_started`, process handle, and final result. Reject duplicate IDs, duplicate output paths, existing outputs, or dependencies inside the concurrent set. Each job remains exactly one Prompt, one output, and one `generate` or `edit` command; never use `--force` for a batch.
+
+Use the execution environment's managed background-process facility to stagger and overlap independent jobs:
+
+1. Start job 1 immediately at elapsed `0` seconds.
+2. Start later jobs no sooner than `10` seconds after the previous actual start (`0/10/20/...` when capacity remains). Do not wait for the prior job to finish.
+3. Keep at most `5` image jobs active. When five are active, wait for a slot; after it opens, also wait until the global 10-second minimum since the previous actual start is satisfied.
+4. Immediately before every launch, reconcile the ledger and output path; launch only a `not_started` job whose output is still absent, then atomically record its process handle and `running` state. Apparent delay, missing PNG, or missing final JSON never permits a duplicate launch.
+5. Give every job an outer process timeout of at least `660000` milliseconds and let only that process own its internal retry. A single job failure must not cancel, restart, or alter siblings.
+6. Keep collecting process completions until every launched job is settled, then emit one ordered summary with job ID, Prompt, output, final state, dimensions when successful, attempts/retry result when reported, and sanitized error when failed.
+
+Do not fake concurrency. If the current execution surface cannot reliably keep multiple background processes alive, retain their handles, enforce the schedule/cap, and collect every exit result, safely degrade the independent jobs to serial execution and report that limitation. Do not use detached shell tricks or claim overlap that was not observed. For `N <= 5`, give the overall collection/wait operation at least `660000 + (N - 1) * 10000` milliseconds. For more than five jobs, use a conservative limit that gives the final capacity-delayed job at least 660 seconds after its actual start; do not claim a precise finish time because slot availability depends on earlier job duration.
+
+Jobs with output dependencies are never concurrent. For reference-image edit plus a multi-output series, run the baseline edit as one serial stage; only after it succeeds and is verified may its fully prepared, mutually independent series jobs enter the staggered concurrent set.
+
+If a follow-up arrives while any `generate` or `edit` command may still be running, treat it as a status inquiry, not a new pass. A missing PNG or missing final JSON is not evidence that the API returned no image. Reconcile the job ledger, original process handle, terminal, and process state first. Declare failure only after the original process has ended with a final runtime error. If its state cannot be confirmed, report the result as unknown. Never launch a replacement command.
 
 Use `--dry-run` only for local request-shape validation. A dry run or fixture is never a generated result.
 
-**Complete when:** one authorized command has returned a validated candidate path or a final actionable error without an agent-level rerun.
+**Complete when:** the single job or every independent job in the authorized pass has settled, successful candidates are validated, one unified result is ready, and no agent-level rerun occurred.
 
 ### 4. Verify, report, and stop
 

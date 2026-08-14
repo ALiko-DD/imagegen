@@ -325,7 +325,7 @@ but use morning, midday, and night scenes respectively.
 4. **Choose the native format:** use JSON, prose, or Markdown according to verifiability instead of forcing one universal format.
 5. **Compose visual controls:** select visual-noise controls first, then load only modifier dimensions that materially affect the result.
 6. **Review semantics and structure:** verify facts, counts, exact text, layout, preservation boundaries, conflicts, placeholders, and JSON syntax.
-7. **Execute one authorized pass:** prefer the built-in route; the fallback runtime owns one command and at most one eligible technical retry.
+7. **Execute the authorized pass:** run one command for a single image; after every Prompt is checked, schedule each independent multi-output job separately, with at most one eligible technical retry per job.
 8. **Verify and report:** confirm that the file exists and has a valid PNG signature and dimensions; perform visual inspection only when the user explicitly requests quality review, report real limitations, and stop.
 
 See [`imagegen/SKILL.md`](imagegen/SKILL.md) for the complete operating rules.

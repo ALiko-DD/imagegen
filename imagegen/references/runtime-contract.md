@@ -59,6 +59,18 @@ Each Node and Python HTTP attempt may remain open for 600 seconds. Launch `gener
 
 The outer limit leaves one minute for image validation, writing, re-reading, and the final JSON summary. `preflight`, `prompt-check`, and `verify` do not require it.
 
+For two or more independent outputs, apply that minimum to every job process, not only to the overall collector. Give an overall collector for `N <= 5` at least `660000 + (N - 1) * 10000` milliseconds so the last regularly staggered job receives its full outer allowance. Above five jobs, capacity waits make the final launch time runtime-dependent: keep the collector alive until all handles settle and ensure at least 660 seconds remain after the final actual launch rather than promising a fixed completion formula.
+
+## Multi-output scheduling
+
+Keep the single-output path unchanged. For two or more independent outputs, the main agent must finish and structurally check every Prompt before any image request starts. Build a ledger in requested order with a stable unique job ID, one Prompt file, mode, ordered edit inputs, size, optional reasoning effort, one unique explicit `.png` output path, process handle, state, and result. Reject duplicate IDs or outputs, existing output files, and any unresolved dependency before launch; do not use `--force`.
+
+Use only a managed execution facility that can retain process handles and collect each command's final stdout, stderr, and exit state. Start the first job immediately. Start each later job at least 10,000 milliseconds after the previous actual start without waiting for that job to finish, while limiting active image jobs to five. If five are active, wait for a slot and still enforce the global 10,000-millisecond start interval. Immediately before launching, require ledger state `not_started` and an absent output, then record `running` plus the process handle before considering another launch.
+
+Each job is exactly one existing `generate` or `edit` invocation and retains the complete single-image request, SSE, PNG, timeout, output, and retry contract. A job failure settles only that item; it does not cancel or rerun siblings. After all handles settle, return one ordered, sanitized summary covering every job. If reliable managed overlap and collection are unavailable, run the independent jobs serially and report the degradation; never use untracked detached commands or claim concurrency.
+
+Never schedule dependencies together. In particular, complete and verify a reference-image baseline edit before launching any independent series outputs that consume it.
+
 ## Configuration
 
 Read only `~/.codex/config.toml`:
@@ -135,7 +147,7 @@ The default output directory is `outputs/` under the current working directory.
 
 ## Retry ownership
 
-For one user-authorized pass, the agent launches one command and the runtime owns the sole technical retry. A configured API command therefore performs at most two HTTP requests: the initial request and one internal retry.
+For one user-authorized single-output pass, the agent launches one command. A multi-output pass may authorize multiple independent jobs, but each job still launches exactly one command. In both cases the runtime owns the sole technical retry, so each configured API job performs at most two HTTP requests: the initial request and one internal retry.
 
 Allow the internal retry only after:
 
@@ -147,7 +159,7 @@ Allow the internal retry only after:
 
 Do not retry after the local 600-second API request timeout. Do not retry configuration, Prompt, input-file, 401/403, normal 4xx, safety, content, decoded-image, PNG, or file-write errors. Cap `Retry-After` waits at 10 seconds.
 
-After the command exits, return control to the agent. The runtime never launches a second command, changes the Prompt, or switches implementation.
+After each command exits, record that job's result and do not relaunch it. The runtime never launches a second command, changes the Prompt, or switches implementation. Wait for all sibling jobs before producing the unified multi-output summary.
 
 ## Errors
 
