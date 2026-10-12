@@ -1,6 +1,6 @@
 ---
 name: imagegen
-description: Generate or experimentally edit raster images with source-audited native-format Prompts, thirteen mutually exclusive structure families, composable visual-noise controls, environment checks, and a deterministic third-party Codex Responses API fallback. Use when Codex must create a PNG, reduce avoidable visual noise or synthetic rendering, preserve quality during image editing, handle a hidden image_generation tool Schema, or respond to an explicit $imagegen request.
+description: Generate raster images or edit them with a callable built-in image tool with source-audited native-format Prompts, thirteen mutually exclusive structure families, composable visual-noise controls, environment checks, and a deterministic configured Images API fallback. Use when Codex must create a PNG, reduce avoidable visual noise or synthetic rendering, preserve quality during image editing, handle a hidden image_generation tool Schema, or respond to an explicit $imagegen request.
 ---
 
 # ImageGen
@@ -27,7 +27,8 @@ Resolve this file's directory as `<skill-dir>`. Load references progressively:
 - Never expose bearer tokens, authorization headers, full configuration, or the full Prompt in diagnostics.
 - Never create a substitute image with SVG, HTML, Canvas, Pillow, or procedural rendering.
 - Never use fallback routing to bypass safety, content, permission, policy, or destructive-action refusal.
-- Treat configured API editing as experimental and report that limitation.
+- The configured `/v1/images/generations` API supports generation only. Use reference-image editing only with a callable built-in editor; otherwise report that an edit API contract is required.
+- Read `.codex/config.toml` without modifying it. Never remove `.codex` or its configuration during image execution.
 
 ## Workflow
 
@@ -114,7 +115,7 @@ Verify:
 - clean-fidelity clauses are compatible with the medium, lighting, focus, materials, and named scope rather than copied as a generic booster stack;
 - text-bearing smooth surfaces separately protect printed strokes and the immediate supporting material field, without aggressive local sharpening;
 - visual controls and modifiers are scoped, dependency-complete, conflict-free, and nonduplicative;
-- orientation is preserved; use `auto` when no supported size maps clearly;
+- orientation is preserved; explicit width and height satisfy the runtime's 16-pixel alignment, edge, aspect-ratio, and pixel-count limits; use `auto` when no supported size maps clearly;
 - selected JSON parses and every placeholder is resolved.
 
 For one output, save and check one Prompt. For two or more independent outputs, finish every Prompt file first, assign every output a stable job ID and a unique explicit `.png` path, then run the local check for every Prompt before launching any image job. Do not delegate Prompt writing or review. Do not start generation while a later Prompt remains unchecked.
@@ -129,18 +130,15 @@ Run the selected runtime's local check:
 
 **Complete when:** every explicit value is represented once, blocking issues are resolved, no unsupported assumption enters the saved Prompt, semantic review passes, every independent Prompt is saved, every planned output path is unique and absent, and each `prompt-check` returns success with `semantic_review_required: true`.
 
-### 2. Choose optional reasoning effort
+### 2. Select generation settings
 
-Leave `--reasoning-effort` absent for ordinary generation. The absent default intentionally sends no `reasoning` field.
+The configured Images API uses `gpt-image-2-4k` when the saved Prompt contains `4k` anywhere, ignoring case; otherwise it uses `gpt-image-2-2k`. Preserve the user's explicit `4k` requirement in the Prompt without adding it to unrelated requests. Omit the `quality` field entirely for both models and let the provider use its default. Model routing does not change the requested size. Preserve a supported explicit size; `auto` omits the size field and lets the provider choose. Do not send `reasoning`, `stream`, `tools`, or the old `--reasoning-effort` option.
 
-- Use `xhigh` for complex reference-image edits, strict multi-region layouts, dense exact-copy requirements, or coupled visual constraints where planning the image-tool call is materially useful.
-- Use `max` only for unusually complex coupled requirements and only after the configured model and image tool have passed a controlled live compatibility check. Never make `max` the default.
-- `quality: high` belongs to the image-generation tool and is independent from reasoning effort.
-- Do not inspect API Key settings, infer an allowed ceiling, change `Originator` or `User-Agent`, or select a different route to obtain a higher reasoning level.
-- The runtime reports `requested_reasoning_effort`; it must not claim the final upstream effort, because an authenticated gateway may cap it.
-- If an explicit reasoning request receives HTTP 400 or 422, report the incompatibility and stop the pass. Do not silently remove, downgrade, or retry without the requested field.
+Read the active provider's `base_url` and bearer credential from `~/.codex/config.toml`. The runtime accepts `experimental_bearer_token` or `api_key` from that provider section; it never hardcodes a host or credential.
 
-**Complete when:** the invocation either omits reasoning deliberately or contains one source-backed explicit value from `high`, `xhigh`, or `max`.
+**Complete when:** the generation settings match the supplied Images API contract.
+
+Use the size mappings in [runtime-contract.md](references/runtime-contract.md). For an explicit 4K request with a clear ratio, use the corresponding 4K mapping unless the user specified exact dimensions. Never choose `4096x4096`: the GPT Image edge limit is 3840 pixels. Reject conflicting exact dimensions rather than silently rounding them. Higher resolutions remain experimental and the configured provider may impose additional limits.
 
 ### 3. Execute one authorized pass
 
@@ -154,13 +152,12 @@ Read [runtime-contract.md](references/runtime-contract.md), select the runtime o
 
 ```text
 <runtime> "<skill-dir>/scripts/imagegen.<ext>" preflight
-<runtime> "<skill-dir>/scripts/imagegen.<ext>" generate --prompt-file "<prompt-file>" [--reasoning-effort high|xhigh|max] --size "<size>" --out-dir "<outputs>"
-<runtime> "<skill-dir>/scripts/imagegen.<ext>" edit --prompt-file "<prompt-file>" --image "<image-1>" [--reasoning-effort high|xhigh|max] --size "<size>" --out-dir "<outputs>"
+<runtime> "<skill-dir>/scripts/imagegen.<ext>" generate --prompt-file "<prompt-file>" --size "<size>" --out-dir "<outputs>"
 ```
 
-For one requested image, launch exactly one foreground `generate` or `edit` command with `timeout_ms: 660000` or greater. The runtime owns the sole technical retry. After command failure, stop the pass. Do not automatically rerun the command, switch runtimes, revise the Prompt, or attempt another fallback within the same pass.
+For one requested generated image, launch exactly one foreground `generate` command with `timeout_ms: 660000` or greater. The runtime owns the sole technical retry. After command failure, stop the pass. Do not automatically rerun the command, switch runtimes, revise the Prompt, or attempt another fallback within the same pass.
 
-For two or more independent requested images, one user-authorized pass may contain multiple independent jobs. Before launching, create a job ledger containing each unique job ID, checked Prompt path, ordered edit-input paths, unique explicit output path, mode, size, reasoning choice, state `not_started`, process handle, and final result. Reject duplicate IDs, duplicate output paths, existing outputs, or dependencies inside the concurrent set. Each job remains exactly one Prompt, one output, and one `generate` or `edit` command; never use `--force` for a batch.
+For two or more independent requested images, one user-authorized pass may contain multiple independent jobs. Before launching, create a job ledger containing each unique job ID, checked Prompt path, unique explicit output path, mode, size, state `not_started`, process handle, and final result. Reject duplicate IDs, duplicate output paths, existing outputs, or dependencies inside the concurrent set. Each configured API job remains exactly one Prompt, one output, and one `generate` command; never use `--force` for a batch.
 
 Use the execution environment's managed background-process facility to stagger and overlap independent jobs:
 
@@ -172,6 +169,8 @@ Use the execution environment's managed background-process facility to stagger a
 6. Keep collecting process completions until every launched job is settled, then emit one ordered summary with job ID, Prompt, output, final state, dimensions when successful, attempts/retry result when reported, and sanitized error when failed.
 
 Do not fake concurrency. If the current execution surface cannot reliably keep multiple background processes alive, retain their handles, enforce the schedule/cap, and collect every exit result, safely degrade the independent jobs to serial execution and report that limitation. Do not use detached shell tricks or claim overlap that was not observed. For `N <= 5`, give the overall collection/wait operation at least `660000 + (N - 1) * 10000` milliseconds. For more than five jobs, use a conservative limit that gives the final capacity-delayed job at least 660 seconds after its actual start; do not claim a precise finish time because slot availability depends on earlier job duration.
+
+The configured API cannot execute edits or consume reference images. Its `edit` command fails locally with `E_EDIT_UNSUPPORTED`, including during dry runs. Never turn an edit request into text-only generation.
 
 Jobs with output dependencies are never concurrent. For reference-image edit plus a multi-output series, run the baseline edit as one serial stage; only after it succeeds and is verified may its fully prepared, mutually independent series jobs enter the staggered concurrent set.
 
@@ -195,7 +194,8 @@ Report:
 
 - absolute output path, actual width and height, and execution route;
 - whether the runtime performed its internal technical retry;
-- the experimental-edit limitation when applicable;
+- any mismatch between requested size, provider metadata, and actual PNG dimensions; returned quality when reported by the provider;
+- the unavailable configured-edit route when applicable;
 - unresolved limitations.
 
 Do not claim artifact-free output or lossless editing when no visual review was requested. Do not claim success when the file is missing or invalid.

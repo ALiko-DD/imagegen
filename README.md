@@ -12,8 +12,8 @@
 - 提供 4 组可组合的视觉噪声控制，用于抑制网格、波纹、脏点、塑料感、过度锐化和编辑污染等问题。
 - 提供 11 个视觉修饰维度，并带有适用范围、冲突和依赖规则。
 - 支持单图生成、参考图编辑和多图系列规划。
-- 优先使用当前 Codex 会话中真实可调用的图像生成工具；不可用或发生技术故障时，可使用 Node.js / Python 脚本走已配置的 Responses API 兼容端点。
-- 对 Prompt、输入图片、输出路径、SSE 响应和最终 PNG 进行本地校验。
+- 优先使用当前 Codex 会话中真实可调用的图像生成工具；不可用或发生技术故障时，可使用 Node.js / Python 脚本调用已配置的 Images API。
+- 对 Prompt、输出路径、JSON 响应和最终 PNG 进行本地校验。
 
 ## 安装与更新
 
@@ -418,14 +418,6 @@ node imagegen/scripts/imagegen.mjs generate \
   --size 1024x1024 \
   --out-dir ./outputs
 
-# 编辑；多个输入图按 --image 的顺序传入
-node imagegen/scripts/imagegen.mjs edit \
-  --prompt-file ./edit-prompt.md \
-  --image ./input-1.png \
-  --image ./input-2.webp \
-  --size auto \
-  --out-dir ./outputs
-
 # 验证已有 PNG
 node imagegen/scripts/imagegen.mjs verify \
   --file ./outputs/result.png
@@ -433,7 +425,7 @@ node imagegen/scripts/imagegen.mjs verify \
 
 `prompt-check` 只做结构校验，返回的 `semantic_review_required: true` 表示仍需人工或 Agent 完成语义审查。`--dry-run` 不是生成结果。
 
-`generate` 和 `edit` 可选用 `--reasoning-effort high|xhigh|max`。普通生成应省略该参数；只有任务确实需要更高推理强度时才显式添加。
+提示词包含 `4k`（不区分大小写，包含 `4K`）时，生成使用 `gpt-image-2-4k`；否则使用 `gpt-image-2-2k`。模型切换不改写提示词或尺寸。请求完全省略 `quality` 字段，由服务商采用默认质量。新接口不支持 `--reasoning-effort`；旧调用传入该参数会在本地报错。`--size auto` 会省略请求的 `size` 字段。
 
 ### 支持尺寸
 
@@ -443,14 +435,20 @@ node imagegen/scripts/imagegen.mjs verify \
 | 1:1 | `1024x1024` |
 | 2:3 竖图 | `1024x1536` |
 | 3:2 横图 | `1536x1024` |
-| 9:16 竖图 | `941x1672` |
-| 16:9 横图 | `1672x941` |
+| 2K 方图 | `2048x2048` |
+| 2K 9:16 竖图 | `1152x2048` |
+| 2K 16:9 横图 | `2048x1152` |
+| 4K 9:16 竖图 | `2160x3840` |
+| 4K 16:9 横图 | `3840x2160` |
+| 4K 最大像素预算下的方图 | `2880x2880` |
 
-不应为了匹配尺寸而擅自裁剪；没有清晰映射时使用 `auto`。
+也接受符合约束的自定义 `宽x高`：宽高均为 16 的倍数、单边不超过 3840 像素、长宽比在 1:3 到 3:1 之间、总像素介于 655,360 和 8,294,400。`4096x4096` 不符合上限；旧的 `941x1672`、`1672x941` 不符合 16 倍数要求，脚本会在发请求前报错，不会擅自取整。
+
+上述约束依据 [OpenAI 官方图片生成文档](https://developers.openai.com/api/docs/guides/image-generation)。超过 `2560x1440` 的分辨率属于实验性支持，第三方服务商的 2K/4K 别名可能另有约束。用户明确要求 4K 且比例清晰时，选用对应 4K 尺寸；精确指定的尺寸优先。没有清晰映射时使用 `auto`，不擅自裁剪。
 
 ## 回退 API 配置
 
-只有在使用仓库内的 Node.js / Python 回退脚本时，才需要配置这一部分。脚本只读取 `~/.codex/config.toml` 中当前 `model_provider` 对应的配置：
+只有在使用仓库内的 Node.js / Python 回退脚本时，才需要配置这一部分。脚本只读取 `~/.codex/config.toml` 中当前 `model_provider` 对应的配置，域名和密钥均不写死。运行时不会修改配置或删除 `.codex`：
 
 ```toml
 model_provider = "your_provider"
@@ -463,21 +461,22 @@ experimental_bearer_token = "replace-with-your-token"
 运行时会请求：
 
 ```text
-{base_url}/backend-api/codex/responses
+{base_url}/v1/images/generations
 ```
 
-该回退路径要求服务端兼容本 Skill 的流式 Responses 请求和 `image_generation` 工具约定，并固定使用脚本中声明的模型与请求结构。不要假设任意 OpenAI API Key、普通 REST 端点或第三方服务都能直接兼容；先执行 `preflight` 和 `--dry-run`，再进行真实请求。
+如果 `base_url` 已以 `/v1` 结尾，则只追加 `/images/generations`，避免重复 `/v1`。密钥优先读取同一服务商节的 `experimental_bearer_token`，该字段缺失或为空时读取 `api_key`；不读取环境变量或其他服务商的密钥。
+
+请求为普通 JSON，只包含按提示词选择的 `model`、原始 Prompt 和可选 `size`，不包含 `quality` 字段。脚本从返回的 `data[0].b64_json` 解码 PNG，不再解析 SSE。实际尺寸以 PNG 内容为准，尺寸不一致时会如实提示；返回的 `quality` 仅作为服务商元数据报告。`preflight` 和 `--dry-run` 均不发起真实图片请求。
 
 > [!CAUTION]
 > 不要提交真实的 `experimental_bearer_token`，不要在问题、日志、截图或 Prompt 中泄露令牌。运行时会尽量隐藏令牌、授权头、完整配置和完整 Prompt，但仓库发布者仍应自行检查提交内容。
 
 ## 编辑限制
 
-- 回退 API 的图片编辑路径是实验性能力。
-- 一次接受 1–16 张 PNG、JPEG 或 WebP，单个文件最大 50 MiB。
-- 输入图顺序会被保留，Prompt 文本位于所有输入图片之后。
-- 不应在没有真实服务商测试的情况下宣称第三方编辑兼容。
-- 不承诺无损编辑、完全无伪影或绝对保持所有像素；完成后必须检查输出并如实报告限制。
+- 当前提供的 `/v1/images/generations` 只用于文生图，未提供图片编辑协议。
+- 脚本 `edit` 命令（含 `--dry-run`）会在本地返回 `E_EDIT_UNSUPPORTED`，不发送请求。
+- 参考图编辑仍可通过真实可调用的内置编辑工具完成；脚本编辑需要另行提供接口说明。
+- 不承诺无损编辑、完全无伪影或绝对保持所有像素；仅在用户要求质量审查时进行目视检查。
 
 ## 项目结构
 
@@ -510,9 +509,11 @@ experimental_bearer_token = "replace-with-your-token"
 - 视觉控制按实际角色限定范围，不使用空泛的 `8K`、`masterpiece`、`HDR` 等质量词堆叠。
 - 不使用 SVG、HTML、Canvas、Pillow 或程序绘图伪造图像生成结果。
 - 不通过回退路由绕过安全、内容、权限或政策拒绝。
-- 每次用户授权只执行一次生成或编辑命令；失败后不会自动换运行时、改 Prompt 或重新发起另一轮。
+- 每个独立输出只执行一次生成命令；多图可按受控调度执行多个任务，失败后不会自动换运行时、改 Prompt 或重新发起另一轮。
 
 ## 本地验证
+
+运行 `python tests/test_images_api.py` 可用本地模拟服务检查两个运行时的请求、鉴权、PNG 保存与重试行为，不访问真实图片服务。测试使用独立临时配置，保留临时目录，不删除用户的 `.codex`。
 
 准备真实生成前，可使用同一份有效 Prompt 分别检查两个运行时：
 

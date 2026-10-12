@@ -7,22 +7,13 @@ import fsp from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
-const MODEL = "gpt-5.6-terra";
-const ENDPOINT_PATH = "/backend-api/codex/responses";
+const MODEL = "gpt-image-2-2k";
+const MODEL_4K = "gpt-image-2-4k";
+const ENDPOINT_PATH = "/v1/images/generations";
 const MAX_PROMPT_CHARACTERS = 20_000;
 const RECOMMENDED_PROMPT_CHARACTERS = Object.freeze({ min: 200, max: 4_000 });
-const MAX_INPUT_IMAGES = 16;
-const MAX_INPUT_BYTES = 50 * 1024 * 1024;
 const REQUEST_TIMEOUT_MS = 600_000;
-const SUPPORTED_REASONING_EFFORTS = new Set(["high", "xhigh", "max"]);
-const SUPPORTED_SIZES = new Set([
-  "auto",
-  "1024x1024",
-  "1024x1536",
-  "1536x1024",
-  "941x1672",
-  "1672x941",
-]);
+const SENSITIVE_VALUES = new Set();
 const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 const SELF_TEST_CONFIG = [
   'model_provider = "vendor"',
@@ -56,10 +47,15 @@ function throwSkill(code, message, options) {
 }
 
 function safeText(value, limit = 600) {
-  const text = String(value ?? "")
+  let sanitized = String(value ?? "");
+  for (const secret of SENSITIVE_VALUES) {
+    sanitized = sanitized.split(secret).join("<redacted>");
+  }
+  const text = sanitized
     .replace(/Authorization\s*:\s*Bearer\s+\S+/gi, "Authorization: Bearer <redacted>")
     .replace(/(experimental_bearer_token|token|secret|password|api[_-]?key)\s*[:=]\s*["']?[^"'\s,}]+/gi, "$1=<redacted>")
-    .replace(/Bearer\s+\S+/gi, "Bearer <redacted>");
+    .replace(/Bearer\s+\S+/gi, "Bearer <redacted>")
+    .replace(/\bsk-[A-Za-z0-9_-]+/g, "<redacted>");
   return text.length > limit ? `${text.slice(0, limit)}…` : text;
 }
 
@@ -69,6 +65,32 @@ function emitJson(value) {
 
 function runtimeName() {
   return "node";
+}
+
+function validateSize(size) {
+  if (size === "auto") {
+    return size;
+  }
+  const match = /^([1-9][0-9]*)x([1-9][0-9]*)$/.exec(size);
+  if (!match) {
+    throwSkill("E_RUNTIME", "Size must be auto or WIDTHxHEIGHT in integer pixels.");
+  }
+  const width = Number(match[1]);
+  const height = Number(match[2]);
+  if (!Number.isSafeInteger(width) || !Number.isSafeInteger(height) || width % 16 !== 0 || height % 16 !== 0) {
+    throwSkill("E_RUNTIME", "Image width and height must both be multiples of 16.");
+  }
+  if (width > 3840 || height > 3840) {
+    throwSkill("E_RUNTIME", "Neither image edge may exceed 3840 pixels; 4096 is unsupported.");
+  }
+  if (Math.max(width, height) > 3 * Math.min(width, height)) {
+    throwSkill("E_RUNTIME", "Image aspect ratio must be between 1:3 and 3:1.");
+  }
+  const pixels = width * height;
+  if (pixels < 655_360 || pixels > 8_294_400) {
+    throwSkill("E_RUNTIME", "Image pixel count must be between 655360 and 8294400.");
+  }
+  return size;
 }
 
 function parseArgs(argv) {
@@ -94,12 +116,10 @@ function parseArgs(argv) {
     force: false,
     dryRun: false,
     size: "auto",
-    reasoningEffort: undefined,
     mode: command === "edit" ? "edit" : "generate",
   };
   const valueOptions = new Map([
     ["--prompt-file", "promptFile"],
-    ["--reasoning-effort", "reasoningEffort"],
     ["--mode", "mode"],
     ["--size", "size"],
     ["--out", "out"],
@@ -110,6 +130,9 @@ function parseArgs(argv) {
 
   for (let index = 1; index < argv.length; index += 1) {
     const token = argv[index];
+    if (token === "--reasoning-effort") {
+      throwSkill("E_RUNTIME", "--reasoning-effort is not supported by the Images API. Remove this option.");
+    }
     if (token === "--force") {
       options.force = true;
       continue;
@@ -134,32 +157,19 @@ function parseArgs(argv) {
     }
   }
 
-  if (!SUPPORTED_SIZES.has(options.size)) {
-    throwSkill(
-      "E_RUNTIME",
-      `Unsupported size "${options.size}". Use ${[...SUPPORTED_SIZES].join(", ")}.`,
-    );
-  }
-  if (
-    options.reasoningEffort !== undefined
-    && !SUPPORTED_REASONING_EFFORTS.has(options.reasoningEffort)
-  ) {
-    throwSkill(
-      "E_RUNTIME",
-      `Unsupported --reasoning-effort "${options.reasoningEffort}". Use ${[...SUPPORTED_REASONING_EFFORTS].join(", ")}.`,
-    );
-  }
+  validateSize(options.size);
+
+
   if (!new Set(["generate", "edit"]).has(options.mode)) {
     throwSkill("E_RUNTIME", "--mode must be generate or edit.");
   }
-  if (
-    options.reasoningEffort !== undefined
-    && !new Set(["generate", "edit"]).has(options.command)
-  ) {
-    throwSkill("E_RUNTIME", "--reasoning-effort is only supported for generate and edit.");
-  }
+
+
   if (options.out && options.outDir) {
     throwSkill("E_WRITE", "Use --out or --out-dir, not both.");
+  }
+  if (command === "generate" && options.images.length) {
+    throwSkill("E_EDIT_UNSUPPORTED", "The generation endpoint cannot accept reference images.");
   }
   return options;
 }
@@ -255,7 +265,7 @@ function parseConfigText(text) {
     const relevant =
       (!currentSection && key === "model_provider") ||
       (currentSection.startsWith("model_providers.") &&
-        new Set(["base_url", "experimental_bearer_token"]).has(key));
+        new Set(["base_url", "experimental_bearer_token", "api_key"]).has(key));
     if (!relevant) {
       continue;
     }
@@ -277,12 +287,13 @@ function parseConfigText(text) {
     throwSkill("E_CONFIG_KEY", `Missing [${providerSectionName}] in config.toml.`);
   }
   const baseUrl = providerSection.base_url;
-  const token = providerSection.experimental_bearer_token;
+  const token = providerSection.experimental_bearer_token || providerSection.api_key;
+  const tokenKey = providerSection.experimental_bearer_token ? "experimental_bearer_token" : "api_key";
   if (!baseUrl) {
     throwSkill("E_CONFIG_KEY", `Missing base_url in [${providerSectionName}].`);
   }
   if (!token) {
-    throwSkill("E_CONFIG_KEY", `Missing experimental_bearer_token in [${providerSectionName}].`);
+    throwSkill("E_CONFIG_KEY", `Missing experimental_bearer_token or api_key in [${providerSectionName}].`);
   }
   let parsedUrl;
   try {
@@ -293,8 +304,12 @@ function parseConfigText(text) {
   if (!new Set(["http:", "https:"]).has(parsedUrl.protocol)) {
     throwSkill("E_CONFIG_PARSE", "base_url must use http or https.");
   }
+  if (!parsedUrl.hostname || parsedUrl.username || parsedUrl.password || parsedUrl.search || parsedUrl.hash) {
+    throwSkill("E_CONFIG_PARSE", "base_url must have a host and no credentials, query, or fragment.");
+  }
   return {
     provider,
+    tokenKey,
     baseUrl: baseUrl.replace(/\/+$/, ""),
     token,
   };
@@ -311,10 +326,9 @@ async function readConfig() {
     }
     throwSkill("E_CONFIG_PARSE", `Could not read config file: ${safeText(error.message)}`);
   }
-  return {
-    configPath,
-    ...parseConfigText(text),
-  };
+  const config = parseConfigText(text);
+  SENSITIVE_VALUES.add(config.token);
+  return { configPath, ...config };
 }
 
 function countUnicodeCharacters(text) {
@@ -417,251 +431,84 @@ async function readPrompt(promptFile, mode) {
   } catch {
     throwSkill("E_PROMPT_ENCODING", "Prompt contains invalid UTF-8 bytes.");
   }
+  SENSITIVE_VALUES.add(text);
   return {
     promptFile: path.resolve(promptFile),
     ...validatePromptText(text, mode),
   };
 }
 
-function detectMime(bytes, filePath) {
-  if (bytes.length >= 8 && bytes.subarray(0, 8).equals(PNG_SIGNATURE)) {
-    return "image/png";
-  }
-  if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) {
-    return "image/jpeg";
-  }
-  if (
-    bytes.length >= 12 &&
-    bytes.toString("ascii", 0, 4) === "RIFF" &&
-    bytes.toString("ascii", 8, 12) === "WEBP"
-  ) {
-    return "image/webp";
-  }
-  throwSkill("E_EDIT_INPUT", `Unsupported image format: ${filePath}. Use PNG, JPEG, or WebP.`);
+function buildEndpoint(baseUrl) {
+  const trimmed = baseUrl.replace(/\/+$/, "");
+  return /\/v1$/i.test(trimmed)
+    ? `${trimmed}/images/generations`
+    : `${trimmed}${ENDPOINT_PATH}`;
 }
 
-async function loadInputImages(imagePaths) {
-  if (!imagePaths.length) {
-    throwSkill("E_EDIT_INPUT", "The edit command requires at least one --image.");
+function buildPayload(promptText, mode, size) {
+  if (mode !== "generate") {
+    throwSkill("E_EDIT_UNSUPPORTED", "The configured Images API only documents generation. Use a callable built-in image editor or provide an edit API contract.");
   }
-  if (imagePaths.length > MAX_INPUT_IMAGES) {
-    throwSkill("E_EDIT_INPUT", `At most ${MAX_INPUT_IMAGES} input images are supported.`);
-  }
-  const images = [];
-  for (const rawPath of imagePaths) {
-    const resolved = path.resolve(rawPath);
-    let stat;
-    try {
-      stat = await fsp.stat(resolved);
-    } catch {
-      throwSkill("E_EDIT_INPUT", `Input image not found: ${resolved}`);
-    }
-    if (!stat.isFile()) {
-      throwSkill("E_EDIT_INPUT", `Input image is not a file: ${resolved}`);
-    }
-    if (stat.size > MAX_INPUT_BYTES) {
-      throwSkill("E_EDIT_INPUT", `Input image exceeds 50 MiB: ${resolved}`);
-    }
-    const bytes = await fsp.readFile(resolved);
-    const mime = detectMime(bytes, resolved);
-    images.push({
-      path: resolved,
-      mime,
-      bytes,
-      dataUrl: `data:${mime};base64,${bytes.toString("base64")}`,
-    });
-  }
-  return images;
-}
-
-function buildPayload(promptText, mode, size, images = [], reasoningEffort) {
-  const tool = {
-    type: "image_generation",
-    quality: "high",
-  };
-  if (size !== "auto") {
-    tool.size = size;
-  }
-  const content = [];
-  if (mode === "edit") {
-    for (const image of images) {
-      content.push({
-        type: "input_image",
-        image_url: image.dataUrl,
-      });
-    }
-  }
-  content.push({
-    type: "input_text",
-    text: promptText,
-  });
   return {
-    model: MODEL,
-    store: false,
-    stream: true,
-    tools: [tool],
-    tool_choice: {
-      type: "image_generation",
-    },
-    input: [
-      {
-        role: "user",
-        content,
-      },
-    ],
-    ...(reasoningEffort ? { reasoning: { effort: reasoningEffort } } : {}),
+    model: /4k/i.test(promptText) ? MODEL_4K : MODEL,
+    prompt: promptText,
+    ...(size !== "auto" ? { size } : {}),
   };
 }
 
 function requestSummary(payload, mode) {
-  const content = payload.input[0].content;
   return {
     model: payload.model,
-    store: payload.store,
-    stream: payload.stream,
-    tool: payload.tools[0],
-    tool_choice: payload.tool_choice,
-    requested_reasoning_effort: payload.reasoning?.effort ?? null,
+    size: payload.size ?? null,
     endpoint_path: ENDPOINT_PATH,
     mode,
-    input_types: content.map((item) => item.type),
-    input_image_count: content.filter((item) => item.type === "input_image").length,
-    prompt_sha256: crypto
-      .createHash("sha256")
-      .update(content.find((item) => item.type === "input_text").text, "utf8")
-      .digest("hex"),
+    response_format: "json",
+    prompt_sha256: crypto.createHash("sha256").update(payload.prompt, "utf8").digest("hex"),
   };
 }
 
-function scanEventValue(value, state) {
-  if (Array.isArray(value)) {
-    for (const item of value) {
-      scanEventValue(item, state);
-    }
-    return;
-  }
-  if (!value || typeof value !== "object") {
-    return;
-  }
-  if (value.item && typeof value.item === "object" && typeof value.item.result === "string") {
-    state.finalImage = value.item.result;
-  }
-  if (typeof value.partial_image_b64 === "string") {
-    state.partialImage = value.partial_image_b64;
-  }
-  for (const nested of Object.values(value)) {
-    scanEventValue(nested, state);
-  }
-}
-
-function processSseBlock(block, state) {
-  const dataLines = [];
-  for (const rawLine of block.split("\n")) {
-    const line = rawLine.endsWith("\r") ? rawLine.slice(0, -1) : rawLine;
-    if (!line || line.startsWith(":")) {
-      continue;
-    }
-    if (line.startsWith("data:")) {
-      dataLines.push(line.slice(5).trimStart());
-    }
-  }
-  if (!dataLines.length) {
-    return;
-  }
-  const data = dataLines.join("\n").trim();
-  if (!data) {
-    return;
-  }
-  if (data === "[DONE]") {
-    state.done = true;
-    return;
-  }
-  let event;
+function parseImageResponse(text, payload) {
+  let response;
   try {
-    event = JSON.parse(data);
+    response = JSON.parse(text);
   } catch {
-    throwSkill("E_SSE", "SSE contained invalid JSON.", { retryable: true });
+    throwSkill("E_RESPONSE_JSON", "Provider returned invalid or truncated JSON.", { retryable: true });
   }
-  const type = String(event.type ?? "");
-  if (event.error || /(?:^|\.)(?:error|failed)$/.test(type)) {
-    const message =
-      event.error?.message ?? event.message ?? event.response?.error?.message ?? "Provider returned an SSE error.";
-    throwSkill("E_HTTP", safeText(message));
+  if (!response || typeof response !== "object" || Array.isArray(response)) {
+    throwSkill("E_RESPONSE_JSON", "Provider response must be a JSON object.");
   }
-  scanEventValue(event, state);
-}
-
-function parseSseText(text) {
-  const state = {
-    finalImage: null,
-    partialImage: null,
-    done: false,
-  };
-  const normalized = text.replace(/\r\n/g, "\n");
-  const blocks = normalized.split("\n\n");
-  for (const block of blocks) {
-    if (block.trim()) {
-      processSseBlock(block, state);
+  if (response.error) {
+    throwSkill("E_HTTP", "Provider returned an error in the JSON response.");
+  }
+  const images = response.data;
+  if (!Array.isArray(images) || images.length !== 1 || typeof images[0]?.b64_json !== "string" || !images[0].b64_json) {
+    throwSkill("E_IMAGE_DATA", "Expected exactly one image in data[0].b64_json.");
+  }
+  const bytes = decodeBase64Strict(images[0].b64_json);
+  const dimensions = verifyPngBytes(bytes);
+  const metadata = {};
+  for (const key of ["model", "quality", "size", "background", "output_format"]) {
+    if (typeof response[key] === "string") {
+      metadata[key] = safeText(response[key], 100);
     }
   }
-  const imageBase64 = state.finalImage ?? state.partialImage;
-  if (!imageBase64) {
-    throwSkill("E_IMAGE_DATA", "SSE completed without image data.", { retryable: true });
+  const warnings = [];
+  if (metadata.model && metadata.model !== payload.model) {
+    warnings.push(`Provider reported model=${metadata.model}; requested ${payload.model}.`);
   }
-  return {
-    imageBase64,
-    source: state.finalImage ? "item.result" : "partial_image_b64",
-    done: state.done,
-  };
-}
-
-async function parseSseStream(body) {
-  if (!body) {
-    throwSkill("E_SSE", "Response did not include an SSE body.", { retryable: true });
+  const actualSize = `${dimensions.width}x${dimensions.height}`;
+  if (payload.size && payload.size !== actualSize) {
+    warnings.push(`Actual PNG size is ${actualSize}; requested ${payload.size}.`);
   }
-  const reader = body.getReader();
-  const decoder = new TextDecoder("utf-8", { fatal: true });
-  const state = {
-    finalImage: null,
-    partialImage: null,
-    done: false,
-  };
-  let buffer = "";
-  try {
-    while (true) {
-      const { value, done } = await reader.read();
-      if (done) {
-        break;
-      }
-      buffer += decoder.decode(value, { stream: true });
-      buffer = buffer.replace(/\r\n/g, "\n");
-      let boundary = buffer.indexOf("\n\n");
-      while (boundary >= 0) {
-        const block = buffer.slice(0, boundary);
-        buffer = buffer.slice(boundary + 2);
-        processSseBlock(block, state);
-        boundary = buffer.indexOf("\n\n");
-      }
+  if (metadata.size && metadata.size !== actualSize) {
+    warnings.push("Provider size metadata disagrees with PNG dimensions; PNG dimensions are used.");
+  }
+  for (const key of ["width", "height", "bytes"]) {
+    if (images[0][key] !== undefined && images[0][key] !== dimensions[key]) {
+      warnings.push(`Provider image ${key} metadata disagrees with PNG bytes.`);
     }
-    buffer += decoder.decode();
-  } catch (error) {
-    if (error instanceof SkillError) {
-      throw error;
-    }
-    throwSkill("E_SSE", `Could not decode SSE: ${safeText(error.message)}`, { retryable: true });
   }
-  if (buffer.trim()) {
-    processSseBlock(buffer, state);
-  }
-  const imageBase64 = state.finalImage ?? state.partialImage;
-  if (!imageBase64) {
-    throwSkill("E_IMAGE_DATA", "SSE completed without image data.", { retryable: true });
-  }
-  return {
-    imageBase64,
-    source: state.finalImage ? "item.result" : "partial_image_b64",
-    done: state.done,
-  };
+  return { imageBase64: images[0].b64_json, source: "data[0].b64_json", metadata, warnings };
 }
 
 function decodeBase64Strict(value) {
@@ -851,38 +698,41 @@ function classifyRequestFailure(error) {
   };
 }
 
-function getReasoningRejectionMessage(status, body, payload) {
-  const requestedReasoningEffort =
-    typeof payload.reasoning?.effort === "string"
-      ? payload.reasoning.effort
-      : null;
-  if (
-    !requestedReasoningEffort
-    || (status !== 400 && status !== 422)
-  ) {
-    return null;
-  }
-  return `Provider rejected a request that included reasoning.effort=\"${requestedReasoningEffort}\". The Skill did not remove or downgrade it; the upstream model/tool combination may not support it. HTTP ${status}. ${body}`;
-}
-
 async function requestOnce(config, payload) {
-  const endpoint = `${config.baseUrl}${ENDPOINT_PATH}`;
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
-  let response;
   try {
-    response = await fetch(endpoint, {
+    const response = await fetch(buildEndpoint(config.baseUrl), {
       method: "POST",
       headers: {
         Authorization: `Bearer ${config.token}`,
         "Content-Type": "application/json",
-        Accept: "text/event-stream",
-        Originator: "codex_cli_rs",
+        Accept: "application/json",
+        Connection: "keep-alive",
       },
       body: JSON.stringify(payload),
       signal: controller.signal,
+      redirect: "manual",
     });
+    if (!response.ok) {
+      if (response.status === 401 || response.status === 403) {
+        throwSkill("E_AUTH", `Provider authentication failed with HTTP ${response.status}.`, {
+          networkRequestPerformed: true,
+        });
+      }
+      const retryable = response.status === 408 || response.status === 429 || response.status >= 500;
+      throwSkill(response.status === 429 ? "E_RATE_LIMIT" : "E_HTTP", `Provider returned HTTP ${response.status}.`, {
+        retryable,
+        networkRequestPerformed: true,
+        details: { response },
+      });
+    }
+    return parseImageResponse(await response.text(), payload);
   } catch (error) {
+    if (error instanceof SkillError) {
+      error.networkRequestPerformed = true;
+      throw error;
+    }
     const failure = classifyRequestFailure(error);
     throwSkill("E_HTTP", failure.message, {
       retryable: failure.retryable,
@@ -891,41 +741,6 @@ async function requestOnce(config, payload) {
   } finally {
     clearTimeout(timeout);
   }
-
-  if (!response.ok) {
-    const body = safeText(await response.text());
-    if (response.status === 401 || response.status === 403) {
-      throwSkill("E_AUTH", `Provider authentication failed with HTTP ${response.status}. ${body}`, {
-        networkRequestPerformed: true,
-      });
-    }
-    if (response.status === 429) {
-      throw new SkillError("E_RATE_LIMIT", `Provider rate limit returned HTTP 429. ${body}`, {
-        retryable: true,
-        networkRequestPerformed: true,
-        details: { response },
-      });
-    }
-    if (response.status === 408 || response.status >= 500) {
-      throw new SkillError("E_HTTP", `Provider returned HTTP ${response.status}. ${body}`, {
-        retryable: true,
-        networkRequestPerformed: true,
-        details: { response },
-      });
-    }
-    const reasoningRejection = getReasoningRejectionMessage(
-      response.status,
-      body,
-      payload,
-    );
-    if (reasoningRejection) {
-      throwSkill("E_HTTP", reasoningRejection, { networkRequestPerformed: true });
-    }
-    throwSkill("E_HTTP", `Provider returned HTTP ${response.status}. ${body}`, {
-      networkRequestPerformed: true,
-    });
-  }
-  return parseSseStream(response.body);
 }
 
 async function requestImage(config, payload) {
@@ -964,7 +779,8 @@ async function runPreflight(options) {
       path: config.configPath,
       provider: config.provider,
       base_url_present: true,
-      experimental_bearer_token_present: true,
+      api_key_present: true,
+      credential_field: config.tokenKey,
     },
     dependencies: {
       external_packages: [],
@@ -972,11 +788,10 @@ async function runPreflight(options) {
       text_decoder: typeof TextDecoder === "function",
     },
     model: MODEL,
-    reasoning_effort: {
-      supported_values: [...SUPPORTED_REASONING_EFFORTS],
-      default: null,
-      default_behavior: "No reasoning field is sent unless --reasoning-effort is explicit.",
-    },
+    model_selection: { default: MODEL, contains_4k: MODEL_4K, case_sensitive: false },
+    endpoint_path: ENDPOINT_PATH,
+    supported_api_modes: ["generate"],
+
     output_directory: outputDirectory,
     network_request_performed: false,
     warnings: [],
@@ -1006,16 +821,13 @@ async function runPromptCheck(options) {
 
 async function runGenerateOrEdit(options) {
   const mode = options.command;
+  if (mode === "edit") {
+    throwSkill("E_EDIT_UNSUPPORTED", "The configured Images API only documents generation. Use a callable built-in image editor or provide an edit API contract.");
+  }
   const prompt = await readPrompt(options.promptFile, mode);
   const config = await readConfig();
-  const images = mode === "edit" ? await loadInputImages(options.images) : [];
-  const payload = buildPayload(
-    prompt.text,
-    mode,
-    options.size,
-    images,
-    options.reasoningEffort,
-  );
+  const payload = buildPayload(prompt.text, mode, options.size);
+
   const summary = requestSummary(payload, mode);
   const outputPath = resolveOutputPath(options);
   await ensureWritableDirectory(path.dirname(outputPath));
@@ -1028,37 +840,38 @@ async function runGenerateOrEdit(options) {
       status: "ok",
       command: mode,
       runtime: runtimeName(),
-      model: MODEL,
-      requested_reasoning_effort: options.reasoningEffort ?? null,
+      model: payload.model,
+      requested_size: payload.size ?? null,
       prompt_file: prompt.promptFile,
       prompt_characters: prompt.characters,
       output_path: outputPath,
       request_summary: summary,
-      experimental: mode === "edit",
+
       network_request_performed: false,
-      warnings: mode === "edit" ? ["Direct API editing is experimental and has not been live-tested."] : [],
+      warnings: [],
     };
   }
 
   const response = await requestImage(config, payload);
   const imageBytes = decodeBase64Strict(response.imageBase64);
-  const dimensions = verifyPngBytes(imageBytes);
+  verifyPngBytes(imageBytes);
   const written = await writePng(outputPath, imageBytes, options.force);
   return {
     status: "ok",
     command: mode,
     runtime: runtimeName(),
-    model: MODEL,
-    requested_reasoning_effort: options.reasoningEffort ?? null,
+    model: payload.model,
+    requested_size: payload.size ?? null,
+    provider_metadata: response.metadata,
     output_path: outputPath,
     width: written.width,
     height: written.height,
     prompt_characters: prompt.characters,
     result_source: response.source,
-    experimental: mode === "edit",
+
     attempts: response.attempts,
     network_request_performed: true,
-    warnings: mode === "edit" ? ["Direct API editing is experimental and has not been live-tested."] : [],
+    warnings: response.warnings,
   };
 }
 
@@ -1159,138 +972,70 @@ async function runSelfTest() {
     assertTest(result.width === 1 && result.height === 1, "PNG dimensions mismatch");
   });
 
-  await record("sse-final-priority", async () => {
-    const text = [
-      `data: {"type":"response.image_generation_call.partial_image","partial_image_b64":"${pngBase64}"}`,
-      "",
-      `data: {"type":"response.output_item.done","item":{"id":"ig_1","type":"image_generation_call","result":"${pngBase64}"}}`,
-      "",
-      "data: [DONE]",
-    ].join("\n");
-    const result = parseSseText(text);
-    assertTest(result.source === "item.result", "final result should win");
-  });
-
-  await record("sse-partial-fallback", async () => {
-    const text = [
-      `data: {"type":"response.image_generation_call.partial_image","partial_image_b64":"${pngBase64}"}`,
-      "",
-      "data: [DONE]",
-    ].join("\n");
-    const result = parseSseText(text);
-    assertTest(result.source === "partial_image_b64", "partial fallback mismatch");
-  });
-
-  await record("sse-malformed", async () => {
-    let code = null;
-    try {
-      parseSseText("data: {invalid-json}\n");
-    } catch (error) {
-      code = error.code;
+  await record("endpoint-normalization", async () => {
+    for (const base of ["https://example.invalid", "https://example.invalid/", "https://example.invalid/v1", "https://example.invalid/v1/"]) {
+      assertTest(buildEndpoint(base) === "https://example.invalid/v1/images/generations", "endpoint mismatch");
     }
-    assertTest(code === "E_SSE", "malformed SSE should be E_SSE");
+    assertTest(buildEndpoint("https://example.invalid/api/v1") === "https://example.invalid/api/v1/images/generations", "prefix lost");
   });
 
-  await record("reasoning-effort-arguments", async () => {
-    const valid = parseArgs([
-      "generate",
-      "--prompt-file",
-      "prompt.txt",
-      "--reasoning-effort",
-      "xhigh",
-      "--dry-run",
-    ]);
-    assertTest(valid.reasoningEffort === "xhigh", "xhigh argument mismatch");
-
-    let invalidCode = null;
-    try {
-      parseArgs([
-        "generate",
-        "--prompt-file",
-        "prompt.txt",
-        "--reasoning-effort",
-        "turbo",
-      ]);
-    } catch (error) {
-      invalidCode = error.code;
-    }
-    assertTest(invalidCode === "E_RUNTIME", "invalid reasoning effort should fail locally");
-
-    let unsupportedCommandCode = null;
-    try {
-      parseArgs(["preflight", "--reasoning-effort", "high"]);
-    } catch (error) {
-      unsupportedCommandCode = error.code;
-    }
-    assertTest(
-      unsupportedCommandCode === "E_RUNTIME",
-      "reasoning effort must be limited to generate and edit",
-    );
+  await record("config-api-key", async () => {
+    const config = parseConfigText(SELF_TEST_CONFIG.replace("experimental_bearer_token", "api_key"));
+    assertTest(config.token === "fixture-token" && config.tokenKey === "api_key", "api_key mismatch");
   });
 
-  await record("reasoning-rejection-diagnostic", async () => {
-    const message = getReasoningRejectionMessage(400, "unsupported", {
-      reasoning: { effort: "max" },
-    });
-    assertTest(
-      message?.includes('reasoning.effort="max"'),
-      "reasoning rejection must name the requested effort",
-    );
-    assertTest(
-      getReasoningRejectionMessage(503, "unavailable", {
-        reasoning: { effort: "max" },
-      }) === null,
-      "transient failures must not be mislabeled as reasoning incompatibility",
-    );
-    assertTest(
-      getReasoningRejectionMessage(400, "bad request", {}) === null,
-      "requests without reasoning must not receive a reasoning diagnostic",
-    );
-  });
-
+  const payload = buildPayload(samplePrompt, "generate", "1536x1024");
   await record("request-shape", async () => {
-    const image = {
-      dataUrl: `data:image/png;base64,${pngBase64}`,
-    };
-    const defaultGenerate = buildPayload(
-      samplePrompt,
-      "generate",
-      "1024x1024",
-      [],
-    );
-    const xhighGenerate = buildPayload(
-      samplePrompt,
-      "generate",
-      "1024x1024",
-      [],
-      "xhigh",
-    );
-    const maxEdit = buildPayload(
-      samplePrompt,
-      "edit",
-      "auto",
-      [image, image],
-      "max",
-    );
-    assertTest(defaultGenerate.model === MODEL, "model mismatch");
-    assertTest(defaultGenerate.reasoning === undefined, "default must omit reasoning");
-    assertTest(defaultGenerate.tools[0].quality === "high", "image quality mismatch");
-    assertTest(defaultGenerate.tools[0].size === "1024x1024", "size mismatch");
-    assertTest(
-      xhighGenerate.reasoning?.effort === "xhigh",
-      "xhigh reasoning payload mismatch",
-    );
-    assertTest(
-      requestSummary(xhighGenerate, "generate").requested_reasoning_effort === "xhigh",
-      "xhigh reasoning summary mismatch",
-    );
-    assertTest(maxEdit.reasoning?.effort === "max", "max reasoning payload mismatch");
-    assertTest(
-      maxEdit.input[0].content.filter((item) => item.type === "input_image").length === 2,
-      "edit image order mismatch",
-    );
-    assertTest(maxEdit.input[0].content.at(-1).type === "input_text", "input_text should be last");
+    assertTest(JSON.stringify(payload) === JSON.stringify({model: "gpt-image-2-2k", prompt: samplePrompt, size: "1536x1024"}), "request mismatch");
+    assertTest(!("quality" in payload), "quality must be omitted");
+    assertTest(!("size" in buildPayload(samplePrompt, "generate", "auto")), "auto must omit size");
   });
+
+  await record("model-routing-4k", async () => {
+    for (const prompt of ["生成一张 4k 图片", "生成一张 4K 图片", "prefix4Ksuffix"]) {
+      const routed = buildPayload(prompt, "generate", "auto");
+      assertTest(routed.model === "gpt-image-2-4k", "4k model routing mismatch");
+      assertTest(routed.prompt === prompt, "routing must preserve the Prompt");
+      assertTest(requestSummary(routed, "generate").model === routed.model, "model summary mismatch");
+    }
+    assertTest(buildPayload("生成一张 2K 图片", "generate", "auto").model === "gpt-image-2-2k", "default model routing mismatch");
+  });
+
+  await record("image-size-constraints", async () => {
+    for (const size of ["auto", "1024x1024", "1536x1024", "1152x2048", "944x1680", "2048x2048", "3840x2160", "2160x3840", "2880x2880"]) {
+      assertTest(parseArgs(["generate", "--size", size]).size === size, "valid size rejected");
+    }
+    for (const size of ["941x1672", "4096x4096", "3840x3840", "512x512", "3072x768", "0x1024", "1024", "1024X1024"]) {
+      let code = null;
+      try { parseArgs(["generate", "--size", size]); } catch (error) { code = error.code; }
+      assertTest(code === "E_RUNTIME", `invalid size accepted: ${size}`);
+    }
+  });
+
+  await record("json-image-response", async () => {
+    const response = parseImageResponse(JSON.stringify({data: [{b64_json: pngBase64, width: 1, height: 1}], size: "999x999", quality: "low"}), payload);
+    assertTest(response.source === "data[0].b64_json", "result source mismatch");
+    assertTest(response.warnings.length === 2, "size mismatches must be reported without a quality warning");
+  });
+
+  await record("json-response-errors", async () => {
+    for (const [text, code] of [["{", "E_RESPONSE_JSON"], ["null", "E_RESPONSE_JSON"], ['{"error":{"message":"refused"}}', "E_HTTP"], ['{"data":[]}', "E_IMAGE_DATA"], ['{"data":[{"b64_json":"invalid!"}]}', "E_IMAGE_DATA"]]) {
+      let actual = null;
+      try { parseImageResponse(text, payload); } catch (error) { actual = error.code; }
+      assertTest(actual === code, `expected ${code}, received ${actual}`);
+    }
+  });
+
+  await record("unsupported-api-options", async () => {
+    let code = null;
+    try { buildPayload(samplePrompt, "edit", "auto"); } catch (error) { code = error.code; }
+    assertTest(code === "E_EDIT_UNSUPPORTED", "edit must fail locally");
+    code = null;
+    try { parseArgs(["generate", "--reasoning-effort", "high"]); } catch (error) { code = error.code; }
+    assertTest(code === "E_RUNTIME", "reasoning must fail locally");
+  });
+
+
 
   await record("request-timeout-contract", async () => {
     assertTest(REQUEST_TIMEOUT_MS === 600_000, "request timeout must be 600 seconds");

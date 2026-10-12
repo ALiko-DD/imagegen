@@ -11,8 +11,8 @@ Pass non-ASCII Prompt content only through a strict UTF-8 Prompt file. Never pas
 ```text
 preflight
 prompt-check --prompt-file <path> [--mode generate|edit]
-generate --prompt-file <path> [--reasoning-effort high|xhigh|max] [--size <size>] [--out <png> | --out-dir <dir>] [--force] [--dry-run]
-edit --prompt-file <path> --image <path> [--image <path> ...] [--reasoning-effort high|xhigh|max] [--size <size>] [--out <png> | --out-dir <dir>] [--force] [--dry-run]
+generate --prompt-file <path> [--size <size>] [--out <png> | --out-dir <dir>] [--force] [--dry-run]
+edit --prompt-file <path> --image <path>  (returns E_EDIT_UNSUPPORTED locally)
 verify --file <png>
 self-test
 ```
@@ -21,22 +21,9 @@ self-test
 
 `prompt-check` accepts JSON, prose, or Markdown. It validates strict UTF-8, common corruption markers, non-empty content, the 20,000-character safety cap, JSON syntax when applicable, and unresolved placeholders. Its success summary includes `semantic_review_required: true`; semantic review remains the agent's responsibility.
 
-## Reasoning effort
+## Generation settings
 
-`--reasoning-effort` is optional and only applies to `generate` and `edit`. Accepted values are `high`, `xhigh`, and `max`.
-
-- Omit it for ordinary image generation. The runtime then deliberately sends no `reasoning` field.
-- Use `xhigh` for complex reference-image edits, strict multi-region layouts, dense exact-copy constraints, or other requests where planning the tool call is materially useful.
-- Use `max` only for unusually complex, coupled requirements after the configured model/tool combination has been verified to accept it. Never make `max` the default.
-- `tools[0].quality: high` controls image-generation quality; it is not a reasoning setting.
-
-When explicit, the runtime sends the canonical field:
-
-```json
-{ "reasoning": { "effort": "xhigh" } }
-```
-
-The JSON result reports `requested_reasoning_effort`, never an asserted effective value. A configured gateway may cap the request according to the authenticated API Key; the runtime must not inspect Key configuration, infer the cap, alter `Originator` or `User-Agent`, or try another path to obtain a higher level. If a request carrying explicit reasoning receives HTTP 400 or 422, return the error unchanged in intent: do not silently remove or downgrade the field, and state that the model/tool combination may not support it.
+If the decoded Prompt contains `4k` anywhere (case-insensitive), use `model: gpt-image-2-4k`; otherwise use `model: gpt-image-2-2k`. Preserve the Prompt text and size unchanged when selecting the model. Omit `quality` entirely for both models so the provider uses its default. Dry-run and final summaries report the selected model. The Images API has no documented reasoning field. An old `--reasoning-effort` option fails locally; do not silently ignore it.
 
 ## Size mapping
 
@@ -48,14 +35,20 @@ Preserve the requested orientation and use the nearest supported mapping only wh
 | Square | `1024x1024` |
 | Portrait 2:3 | `1024x1536` |
 | Landscape 3:2 | `1536x1024` |
-| Portrait 9:16 | `941x1672` |
-| Landscape 16:9 | `1672x941` |
+| 2K square | `2048x2048` |
+| 2K portrait 9:16 | `1152x2048` |
+| 2K landscape 16:9 | `2048x1152` |
+| 4K portrait 9:16 | `2160x3840` |
+| 4K landscape 16:9 | `3840x2160` |
+| Square at the maximum 4K pixel budget | `2880x2880` |
 
-Do not invent a crop to force a mapping. Keep `auto` when no supported ratio maps clearly.
+Accept custom `WIDTHxHEIGHT` sizes that satisfy the [official GPT Image constraints](https://developers.openai.com/api/docs/guides/image-generation): both edges divisible by 16, neither edge above 3840 pixels, aspect ratio between 1:3 and 3:1, and total pixels between 655,360 and 8,294,400 inclusive. Reject invalid sizes locally without rounding or sending a request. In particular, `941x1672`, `1672x941`, and `4096x4096` are invalid. Resolutions above `2560x1440` are experimental. The configured provider's 2K/4K aliases may impose additional limits; these mappings are not a live compatibility guarantee.
+
+If a user explicitly requests 4K and a clear ratio, choose the corresponding 4K mapping unless exact dimensions were provided. Do not invent a crop to force a mapping. `auto` omits `size` rather than sending the literal value; choosing the 4K model alone does not force a particular size.
 
 ## Execution timeout
 
-Each Node and Python HTTP attempt may remain open for 600 seconds. Launch `generate` and `edit` with an outer command-runner timeout of at least `660000` milliseconds. When the shell exposes `timeout_ms`, set `timeout_ms: 660000` instead of accepting a default `120000` millisecond limit.
+Each Node and Python HTTP attempt may remain open for 600 seconds. Launch `generate` with an outer command-runner timeout of at least `660000` milliseconds. When the shell exposes `timeout_ms`, set `timeout_ms: 660000` instead of accepting a default `120000` millisecond limit.
 
 The outer limit leaves one minute for image validation, writing, re-reading, and the final JSON summary. `preflight`, `prompt-check`, and `verify` do not require it.
 
@@ -63,11 +56,11 @@ For two or more independent outputs, apply that minimum to every job process, no
 
 ## Multi-output scheduling
 
-Keep the single-output path unchanged. For two or more independent outputs, the main agent must finish and structurally check every Prompt before any image request starts. Build a ledger in requested order with a stable unique job ID, one Prompt file, mode, ordered edit inputs, size, optional reasoning effort, one unique explicit `.png` output path, process handle, state, and result. Reject duplicate IDs or outputs, existing output files, and any unresolved dependency before launch; do not use `--force`.
+Keep the single-output path unchanged. For two or more independent outputs, the main agent must finish and structurally check every Prompt before any image request starts. Build a ledger in requested order with a stable unique job ID, one Prompt file, mode, size, one unique explicit `.png` output path, process handle, state, and result. Reject duplicate IDs or outputs, existing output files, and any unresolved dependency before launch; do not use `--force`.
 
 Use only a managed execution facility that can retain process handles and collect each command's final stdout, stderr, and exit state. Start the first job immediately. Start each later job at least 10,000 milliseconds after the previous actual start without waiting for that job to finish, while limiting active image jobs to five. If five are active, wait for a slot and still enforce the global 10,000-millisecond start interval. Immediately before launching, require ledger state `not_started` and an absent output, then record `running` plus the process handle before considering another launch.
 
-Each job is exactly one existing `generate` or `edit` invocation and retains the complete single-image request, SSE, PNG, timeout, output, and retry contract. A job failure settles only that item; it does not cancel or rerun siblings. After all handles settle, return one ordered, sanitized summary covering every job. If reliable managed overlap and collection are unavailable, run the independent jobs serially and report the degradation; never use untracked detached commands or claim concurrency.
+Each configured job is exactly one `generate` invocation and retains the complete single-image JSON, PNG, timeout, output, and retry contract. A job failure settles only that item; it does not cancel or rerun siblings. After all handles settle, return one ordered, sanitized summary covering every job. If reliable managed overlap and collection are unavailable, run the independent jobs serially and report the degradation; never use untracked detached commands or claim concurrency.
 
 Never schedule dependencies together. In particular, complete and verify a reference-image baseline edit before launching any independent series outputs that consume it.
 
@@ -78,60 +71,44 @@ Read only `~/.codex/config.toml`:
 1. Read top-level `model_provider`.
 2. Read `[model_providers.<model_provider>]`.
 3. Require `base_url`.
-4. Require `experimental_bearer_token`.
+4. Read `experimental_bearer_token`, or use `api_key` from the same section when the former is absent or empty.
 
-Do not fall back to another provider, workspace configuration, environment variable, or cached plugin file.
+Do not fall back to another provider, workspace configuration, environment variable, or cached plugin file. Never modify this configuration file or remove `.codex`.
 
 ## Request
 
-POST to:
+POST to the configured base URL plus `/v1/images/generations`. If the base URL already ends with `/v1` (optionally followed by a slash), append only `/images/generations`. Preserve other configured path prefixes. Reject embedded credentials, query strings, and fragments. Do not hardcode the hostname.
+
+Headers:
 
 ```text
-{base_url}/backend-api/codex/responses
-```
-
-Required headers:
-
-```text
-Authorization: Bearer <experimental_bearer_token>
+Authorization: Bearer <configured credential>
 Content-Type: application/json
-Accept: text/event-stream
-Originator: codex_cli_rs
+Accept: application/json
+Connection: keep-alive
 ```
 
-Body invariants:
+Body:
 
-- `model`: `gpt-5.6-terra`
-- `store`: `false`
-- `stream`: `true`
-- one `image_generation` tool with `quality: high`
-- `tool_choice` forced to `image_generation`
-- exact decoded Prompt file text in `input_text`
+```json
+{
+  "model": "gpt-image-2-2k",
+  "prompt": "Exact decoded Prompt file text",
+  "size": "1536x1024"
+}
+```
 
-Set `tools[0].size` only when size is not `auto`.
+Omit `size` when the CLI selects `auto`. Always omit `quality`; do not replace it with `high`, `auto`, or `null`. Do not send Responses API fields such as `input`, `tools`, `store`, `stream`, or `reasoning`. Redirects are rejected so credentials are not sent to a different endpoint.
 
 ## Editing
 
-The configured API edit route is experimental:
+The supplied endpoint documents text-to-image generation only. The script's `edit` entrypoint returns `E_EDIT_UNSUPPORTED` before reading input files or sending any request, including with `--dry-run`. Reference-image editing can still use a callable built-in editor. A configured edit route requires its own supplied API contract; never invent an `/images/edits` request.
 
-- accept 1–16 PNG, JPEG, or WebP files;
-- reject files larger than 50 MiB;
-- preserve command-line order;
-- convert each image to a data URL in an `input_image` item;
-- place `input_text` after all images;
-- return `experimental: true` and a warning.
+## JSON response
 
-Do not claim third-party edit compatibility without a real provider test.
+Require a JSON object with exactly one image in `data[0].b64_json`, then decode and validate it as PNG. A JSON error object or missing image data stops the job.
 
-## SSE
-
-- Decode UTF-8 incrementally.
-- Join multi-line `data:` fields.
-- Ignore comments and empty events.
-- Accept `[DONE]`.
-- Prefer `item.result`.
-- Use the last `partial_image_b64` only when no final result exists.
-- Treat malformed JSON and missing image data as technical stream errors.
+Use actual PNG dimensions as authoritative. The provider may return inconsistent top-level `size`, as in the supplied example. Report requested settings separately from provider metadata and flag size discrepancies. Preserve returned `quality` as provider metadata when present, without comparing it to a requested quality or inventing a default value. Do not emit `revised_prompt`, raw response bodies, Base64, or the full Prompt in diagnostics.
 
 ## PNG output
 
@@ -155,7 +132,7 @@ Allow the internal retry only after:
 - HTTP 408;
 - HTTP 429;
 - HTTP 5xx;
-- malformed or truncated SSE without usable image data.
+- malformed or truncated JSON without usable image data.
 
 Do not retry after the local 600-second API request timeout. Do not retry configuration, Prompt, input-file, 401/403, normal 4xx, safety, content, decoded-image, PNG, or file-write errors. Cap `Retry-After` waits at 10 seconds.
 
@@ -175,11 +152,11 @@ E_CONFIG_KEY
 E_PROMPT_ENCODING
 E_PROMPT_LENGTH
 E_PROMPT_STRUCTURE
-E_EDIT_INPUT
+E_EDIT_UNSUPPORTED
 E_AUTH
 E_RATE_LIMIT
 E_HTTP
-E_SSE
+E_RESPONSE_JSON
 E_IMAGE_DATA
 E_PNG
 E_WRITE

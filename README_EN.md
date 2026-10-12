@@ -12,8 +12,8 @@ An image-generation and experimental image-editing Skill for Codex. ImageGen is 
 - Provide four composable visual-noise control groups for reducing grids, ripples, grime, blocks, plastic rendering, oversharpening, and edit contamination.
 - Provide eleven visual modifier dimensions with applicability, conflict, and dependency rules.
 - Support single-image generation, reference-image editing, and multi-image series planning.
-- Prefer a genuinely callable image-generation tool in the current Codex session; when it is unavailable or fails technically, use the included Node.js or Python runtime with a configured Responses-compatible endpoint.
-- Validate Prompt files, input images, output paths, SSE responses, and final PNG files locally.
+- Prefer a callable image-generation tool in the current Codex session; when it is unavailable or fails technically, use the included Node.js or Python runtime with a configured Images API.
+- Validate Prompt files, output paths, JSON responses, and final PNG files locally.
 
 ## Installation and Updates
 
@@ -422,14 +422,6 @@ node imagegen/scripts/imagegen.mjs generate \
   --size 1024x1024 \
   --out-dir ./outputs
 
-# Edit images; input order follows the order of --image arguments
-node imagegen/scripts/imagegen.mjs edit \
-  --prompt-file ./edit-prompt.md \
-  --image ./input-1.png \
-  --image ./input-2.webp \
-  --size auto \
-  --out-dir ./outputs
-
 # Verify an existing PNG
 node imagegen/scripts/imagegen.mjs verify \
   --file ./outputs/result.png
@@ -437,7 +429,7 @@ node imagegen/scripts/imagegen.mjs verify \
 
 `prompt-check` performs structural validation only. A successful result includes `semantic_review_required: true` because human or agent semantic review is still required. A `--dry-run` is never a generated result.
 
-`generate` and `edit` optionally accept `--reasoning-effort high|xhigh|max`. Omit this option for ordinary generation and add it only when the task genuinely needs greater reasoning effort.
+A Prompt containing `4k` anywhere, ignoring case (including `4K`), selects `gpt-image-2-4k`; otherwise generation uses `gpt-image-2-2k`. Model selection does not alter the Prompt or size. The request omits `quality` entirely and uses the provider's default. The new endpoint does not support `--reasoning-effort`; old invocations using it fail locally. `--size auto` omits the request's `size` field.
 
 ### Supported Sizes
 
@@ -447,14 +439,20 @@ node imagegen/scripts/imagegen.mjs verify \
 | 1:1 | `1024x1024` |
 | Portrait 2:3 | `1024x1536` |
 | Landscape 3:2 | `1536x1024` |
-| Portrait 9:16 | `941x1672` |
-| Landscape 16:9 | `1672x941` |
+| 2K square | `2048x2048` |
+| 2K portrait 9:16 | `1152x2048` |
+| 2K landscape 16:9 | `2048x1152` |
+| 4K portrait 9:16 | `2160x3840` |
+| 4K landscape 16:9 | `3840x2160` |
+| Square at the maximum 4K pixel budget | `2880x2880` |
 
-Do not invent a crop merely to force a size mapping. Use `auto` when no supported ratio maps clearly.
+Custom `WIDTHxHEIGHT` values must have both edges divisible by 16, neither edge above 3840 pixels, an aspect ratio between 1:3 and 3:1, and a total pixel count between 655,360 and 8,294,400. `4096x4096` exceeds the limits; legacy `941x1672` and `1672x941` violate alignment. The runtime rejects invalid sizes before sending requests without silently rounding them.
+
+These constraints follow the [official OpenAI image generation guide](https://developers.openai.com/api/docs/guides/image-generation). Resolutions above `2560x1440` are experimental, and third-party 2K/4K aliases may have additional limits. For an explicit 4K request with a clear ratio, select the corresponding 4K dimensions; exact user-specified dimensions take precedence. Use `auto` when no mapping is clear, without inventing a crop.
 
 ## Fallback API Configuration
 
-This configuration is required only when using the included Node.js or Python fallback runtime. The scripts read only the active `model_provider` entry from `~/.codex/config.toml`:
+This configuration is required only when using the included Node.js or Python fallback runtime. The scripts read only the active `model_provider` entry from `~/.codex/config.toml`; neither the host nor credential is hardcoded. Runtime execution never modifies this configuration or removes `.codex`:
 
 ```toml
 model_provider = "your_provider"
@@ -467,21 +465,22 @@ experimental_bearer_token = "replace-with-your-token"
 The runtime sends requests to:
 
 ```text
-{base_url}/backend-api/codex/responses
+{base_url}/v1/images/generations
 ```
 
-The fallback service must support this Skill's streaming Responses request and `image_generation` tool contract, including the model and request shape declared in the scripts. Do not assume that an arbitrary OpenAI API key, ordinary REST endpoint, or third-party provider is directly compatible. Run `preflight` and `--dry-run` before making a real request.
+If `base_url` already ends with `/v1`, append only `/images/generations`. Read `experimental_bearer_token` from that provider section, or `api_key` when the former is absent or empty. Credentials from environment variables or other providers are not used.
+
+The JSON request contains only the Prompt-selected `model`, the original Prompt, and an optional `size`, with no `quality` field. Decode the PNG from `data[0].b64_json`; SSE parsing is no longer used. Actual dimensions come from the PNG, and size discrepancies are reported. Returned `quality` is reported only as provider metadata. Both `preflight` and `--dry-run` avoid real image requests.
 
 > [!CAUTION]
 > Never commit a real `experimental_bearer_token` or expose it in issues, logs, screenshots, or Prompts. The runtime attempts to redact tokens, authorization headers, complete configuration, and the complete Prompt, but repository maintainers must still inspect their commits.
 
 ## Editing Limitations
 
-- The fallback API image-editing route is experimental.
-- One edit accepts 1–16 PNG, JPEG, or WebP files, with a maximum of 50 MiB per file.
-- Input-image order is preserved, and the Prompt text follows all input images.
-- Do not claim third-party editing compatibility without testing the actual provider.
-- Do not promise lossless editing, artifact-free output, or absolute preservation of every pixel; inspect the result and report limitations honestly.
+- The supplied `/v1/images/generations` contract supports text-to-image generation only; no editing contract was supplied.
+- The script's `edit` command, including `--dry-run`, returns `E_EDIT_UNSUPPORTED` locally without sending a request.
+- Reference-image editing can still use a callable built-in editor; script-based editing requires a separate API contract.
+- Do not promise lossless editing, artifact-free output, or absolute pixel preservation; perform visual inspection only when the user requests quality review.
 
 ## Project Structure
 
@@ -514,9 +513,11 @@ The fallback service must support this Skill's streaming Responses request and `
 - Scope visual controls to actual roles and avoid vague quality-booster stacks such as `8K`, `masterpiece`, or `HDR`.
 - Never use SVG, HTML, Canvas, Pillow, or procedural drawing as a substitute for an image-generation result.
 - Never use fallback routing to bypass safety, content, policy, or permission refusals.
-- Execute only one generation or edit command per user-authorized pass; after failure, do not automatically switch runtimes, rewrite the Prompt, or launch another pass.
+- Execute one generation command per independent output; multiple outputs may use controlled scheduling. After failure, do not automatically switch runtimes, rewrite the Prompt, or launch another pass.
 
 ## Local Validation
+
+Run `python tests/test_images_api.py` to check requests, authentication, PNG saving, and retries for both runtimes against a local mock server. It does not contact a real image service. Tests use isolated temporary configuration, retain their temporary directories, and never remove the user's `.codex`.
 
 Before a real generation request, validate the same complete Prompt with both runtimes:
 
