@@ -13,8 +13,8 @@ Pass non-ASCII Prompt content only through a strict UTF-8 Prompt file. Never pas
 ```text
 preflight
 prompt-check --prompt-file <path> [--mode generate|edit]
-generate --prompt-file <path> [--size <size>] [--out <png> | --out-dir <dir>] [--force] [--dry-run]
-edit --prompt-file <path> --image <path> [--image <path> ...] [--size <size>] [--out <png> | --out-dir <dir>] [--force] [--dry-run]
+generate --prompt-file <path> [--model gpt-image-2-2k|gpt-image-2-4k] [--size <size>] [--out <png> | --out-dir <dir>] [--force] [--dry-run]
+edit --prompt-file <path> --image <path> [--image <path> ...] [--model gpt-image-2-2k|gpt-image-2-4k] [--size <size>] [--out <png> | --out-dir <dir>] [--force] [--dry-run]
 verify --file <png>
 self-test
 ```
@@ -25,7 +25,19 @@ self-test
 
 ## Generation settings
 
-If the decoded Prompt contains `4k` anywhere (case-insensitive), use `model: gpt-image-2-4k`; otherwise use `model: gpt-image-2-2k`. Preserve the Prompt text and size unchanged when selecting the model. Omit `quality` entirely for both models so the provider uses its default. Dry-run and final summaries report the selected model. The Images API has no documented reasoning field. An old `--reasoning-effort` option fails locally; do not silently ignore it.
+Model precedence: explicit `--model`, then case-insensitive `4k` anywhere in the decoded Prompt, then the matching base image job record for edits, then `gpt-image-2-2k`. Only `gpt-image-2-2k` and `gpt-image-2-4k` are accepted. Explicit selection controls routing without rewriting the Prompt and permits a user-authorized downgrade even when an earlier 4K requirement remains in the Prompt. Omit `quality` for both models. Dry-run and final summaries report the model and `settings_selection` (`model_source`, `size_source`, `source_record`). The Images API has no documented reasoning field. An old `--reasoning-effort` option fails locally; do not silently ignore it.
+
+## Follow-up edit inheritance
+
+Every successful generation or edit saves a sibling `<output.png>.imagegen.json` containing only `version: 1`, effective request `model`, `requested_size` (explicit size or null for `auto`), actual PNG `width`/`height`, and `image_sha256`. It contains no Prompt, configuration, credential, or API response. The result returns its absolute `job_record` path. Copy/rename the PNG and record together, keeping the naming convention.
+
+Editing reads only the first `--image` file's sibling record. Validate the version, allowed model, explicit size, actual dimensions, and SHA-256 against the loaded base image. Other references never determine settings. Repeated edits save new records, so a 4K chain remains 4K even if later Prompts omit `4k`.
+
+Size precedence: explicit `--size` (including `auto`), then the original explicit requested size, then actual PNG dimensions when the original request used `auto`, then `auto` for an unknown source. This preserves an explicit requested resolution even when the provider returned a different size. Unsupported inherited dimensions return `E_EDIT_SETTINGS`, never silently shrink or omit size.
+
+A missing record preserves default routing but warns when an edit defaults to 2K. Agents must recover known settings from earlier results/conversation for older images or built-in outputs and pass them explicitly. Pixel dimensions do not identify a model. Malformed, unreadable, or mismatched records return `E_EDIT_SETTINGS` before any request. Providing both explicit `--model` and `--size` bypasses inheritance for deliberate recovery. No extra API fields are introduced.
+
+Records and PNGs are both protected from default overwrite. A dry-run creates neither. If record writing fails after the PNG was saved, return `E_WRITE` and report that partial result; do not repeat the image request automatically.
 
 ## Size mapping
 
@@ -120,6 +132,8 @@ Require a JSON object with exactly one image in `data[0].b64_json`, then decode 
 
 Use actual PNG dimensions as authoritative. The provider may return inconsistent top-level `size`, as in the supplied example. Report requested settings separately from provider metadata and flag size discrepancies. Preserve returned `quality` as provider metadata when present, without comparing it to a requested quality or inventing a default value. Do not emit `revised_prompt`, raw response bodies, Base64, or the full Prompt in diagnostics.
 
+Returned `quality: low`, `medium`, or `high` must not generate a quality-mismatch warning: the configured API request sends no quality field. Agent summaries must not describe it as “different from requested high” or evidence of a model/resolution downgrade or poor visual quality. Prompt wording such as “high resolution” is not an API quality setting. If needed, report the provider's label together with the fact that this request omitted quality.
+
 ## PNG output
 
 - Strictly decode Base64.
@@ -129,6 +143,7 @@ Use actual PNG dimensions as authoritative. The provider may return inconsistent
 - Write through a temporary sibling file.
 - Refuse overwrite unless `--force` is explicit.
 - Re-read and verify the final file after writing.
+- Save the matching job record and return its path for follow-up inheritance.
 
 The default output directory is `outputs/` under the current working directory.
 
@@ -163,6 +178,7 @@ E_PROMPT_ENCODING
 E_PROMPT_LENGTH
 E_PROMPT_STRUCTURE
 E_EDIT_INPUT
+E_EDIT_SETTINGS
 E_AUTH
 E_RATE_LIMIT
 E_HTTP

@@ -149,7 +149,8 @@ def build_parser() -> argparse.ArgumentParser:
         operation.add_argument("--prompt-file", required=True)
 
 
-        operation.add_argument("--size", type=validate_size, default="auto")
+        operation.add_argument("--size", type=validate_size)
+        operation.add_argument("--model", choices=[MODEL, MODEL_4K])
         operation.add_argument("--out")
         operation.add_argument("--out-dir")
         operation.add_argument("--force", action="store_true")
@@ -400,11 +401,70 @@ def build_endpoint(base_url: str, mode: str = "generate") -> str:
     return trimmed + suffix
 
 
-def build_payload(prompt_text: str, mode: str, size: str) -> Dict[str, Any]:
-    payload = {"model": MODEL_4K if "4k" in prompt_text.lower() else MODEL, "prompt": prompt_text}
+def build_payload(prompt_text: str, mode: str, size: str, model: Optional[str] = None) -> Dict[str, Any]:
+    payload = {"model": model or (MODEL_4K if "4k" in prompt_text.lower() else MODEL), "prompt": prompt_text}
     if size != "auto":
         payload["size"] = size
     return payload
+
+
+def resolve_settings(args: argparse.Namespace, prompt_text: str, images: List[Dict[str, Any]]) -> Dict[str, Any]:
+    record = None
+    source_record = None
+    if args.command == "edit" and not (args.model and args.size is not None):
+        candidate = Path(images[0]["path"] + ".imagegen.json")
+        try:
+            text = candidate.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            text = None
+        except (OSError, UnicodeError):
+            fail("E_EDIT_SETTINGS", "Could not read the base image job record. Specify both --model and --size to override inheritance.")
+        if text is not None:
+            try:
+                record = json.loads(text)
+                dimensions = verify_png_bytes(images[0]["bytes"])
+                if not isinstance(record, dict) or record.get("version") != 1 or record.get("model") not in (MODEL, MODEL_4K) \
+                        or record.get("image_sha256") != hashlib.sha256(images[0]["bytes"]).hexdigest() \
+                        or record.get("width") != dimensions["width"] or record.get("height") != dimensions["height"] \
+                        or "requested_size" not in record or (record["requested_size"] is not None and not isinstance(record["requested_size"], str)):
+                    raise ValueError("Invalid record")
+                if record["requested_size"] == "auto":
+                    raise ValueError("Invalid requested size")
+                if record["requested_size"] is not None:
+                    validate_size(record["requested_size"])
+                source_record = str(candidate)
+            except (ValueError, SkillError):
+                fail("E_EDIT_SETTINGS", "Base image job record is invalid or does not match the image. Specify both --model and --size to override inheritance.")
+    prompt_4k = "4k" in prompt_text.lower()
+    model = args.model or (MODEL_4K if prompt_4k else record["model"] if record else MODEL)
+    model_source = "explicit" if args.model else "prompt_4k" if prompt_4k else "base_record" if record else "default"
+    size = args.size if args.size is not None else (record["requested_size"] or f"{record['width']}x{record['height']}") if record else "auto"
+    try:
+        size = validate_size(size)
+    except SkillError:
+        if args.size is None and record:
+            fail("E_EDIT_SETTINGS", "Inherited image dimensions are unsupported. Specify --size explicitly; dimensions will not be silently reduced.")
+        raise
+    return {
+        "model": model, "size": size,
+        "selection": {"model_source": model_source, "size_source": "explicit" if args.size is not None else "base_record" if record else "default", "source_record": source_record},
+        "warnings": ["No base image model record was found. Defaulting to 2K; use --model to preserve a model known from earlier context. Image dimensions do not identify the original model."] if args.command == "edit" and model_source == "default" else [],
+    }
+
+
+def write_job_record(output_path: Path, payload: Dict[str, Any], image_data: bytes, dimensions: Dict[str, int], force: bool) -> str:
+    record_path = Path(str(output_path) + ".imagegen.json")
+    record = {
+        "version": 1, "model": payload["model"], "requested_size": payload.get("size"),
+        "width": dimensions["width"], "height": dimensions["height"],
+        "image_sha256": hashlib.sha256(image_data).hexdigest(),
+    }
+    try:
+        with open(record_path, "w" if force else "x", encoding="utf-8") as stream:
+            stream.write(json.dumps(record, ensure_ascii=False, indent=2) + "\n")
+    except OSError as error:
+        raise SkillError("E_WRITE", f"PNG saved, but its job record could not be written: {safe_text(error)}", network_request_performed=True)
+    return str(record_path)
 
 
 def detect_image_mime(data: bytes) -> str:
@@ -789,7 +849,7 @@ def run_preflight(args: argparse.Namespace) -> Dict[str, Any]:
             "strict_utf8_decoder": True,
         },
         "model": MODEL,
-        "model_selection": {"default": MODEL, "contains_4k": MODEL_4K, "case_sensitive": False},
+        "model_selection": {"default": MODEL, "contains_4k": MODEL_4K, "case_sensitive": False, "explicit_option": "--model", "edit_inherits_base_record": True},
         "endpoint_path": ENDPOINT_PATH,
         "edit_endpoint_path": EDIT_ENDPOINT_PATH,
         "supported_api_modes": ["generate", "edit"],
@@ -837,13 +897,14 @@ def run_generate_or_edit(args: argparse.Namespace) -> Dict[str, Any]:
     images = load_input_images(args.image) if mode == "edit" else []
     if mode == "edit":
         multipart_library()
-    payload = build_payload(prompt["text"], mode, args.size)
+    settings = resolve_settings(args, prompt["text"], images)
+    payload = build_payload(prompt["text"], mode, settings["size"], settings["model"])
 
     summary = request_summary(payload, mode, images)
     output_path = resolve_output_path(args)
     ensure_writable_directory(output_path.parent)
-    if output_path.exists() and not args.force:
-        fail("E_WRITE", f"Output file already exists: {output_path}")
+    if not args.force and (output_path.exists() or Path(str(output_path) + ".imagegen.json").exists()):
+        fail("E_WRITE", f"Output PNG or job record already exists: {output_path}")
 
     if args.dry_run:
         return {
@@ -852,13 +913,14 @@ def run_generate_or_edit(args: argparse.Namespace) -> Dict[str, Any]:
             "runtime": "python",
             "model": payload["model"],
             "requested_size": payload.get("size"),
+            "settings_selection": settings["selection"],
             "prompt_file": prompt["prompt_file"],
             "prompt_characters": prompt["characters"],
             "output_path": str(output_path),
             "request_summary": summary,
 
             "network_request_performed": False,
-            "warnings": edit_warnings(payload, mode),
+            "warnings": settings["warnings"] + edit_warnings(payload, mode),
 
         }
 
@@ -866,12 +928,15 @@ def run_generate_or_edit(args: argparse.Namespace) -> Dict[str, Any]:
     image_data = decode_base64_strict(response["image_base64"])
     verify_png_bytes(image_data)
     written = write_png(output_path, image_data, args.force)
+    job_record = write_job_record(output_path, payload, image_data, written, args.force)
     return {
         "status": "ok",
         "command": mode,
         "runtime": "python",
         "model": payload["model"],
         "requested_size": payload.get("size"),
+        "settings_selection": settings["selection"],
+        "job_record": job_record,
         "provider_metadata": response["metadata"],
         "output_path": str(output_path),
         "width": written["width"],
@@ -883,7 +948,7 @@ def run_generate_or_edit(args: argparse.Namespace) -> Dict[str, Any]:
 
         "attempts": response["attempts"],
         "network_request_performed": True,
-        "warnings": response["warnings"] + edit_warnings(payload, mode),
+        "warnings": response["warnings"] + settings["warnings"] + edit_warnings(payload, mode),
 
     }
 

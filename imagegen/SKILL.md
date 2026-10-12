@@ -130,9 +130,13 @@ Run the selected runtime's local check:
 
 **Complete when:** every explicit value is represented once, blocking issues are resolved, no unsupported assumption enters the saved Prompt, semantic review passes, every independent Prompt is saved, every planned output path is unique and absent, and each `prompt-check` returns success with `semantic_review_required: true`.
 
-### 2. Select generation settings
+### 2. Select generation or inherited editing settings
 
-The configured Images API uses `gpt-image-2-4k` when the saved Prompt contains `4k` anywhere, ignoring case; otherwise it uses `gpt-image-2-2k`. Preserve the user's explicit `4k` requirement in the Prompt without adding it to unrelated requests. Omit the `quality` field entirely for both models and let the provider use its default. Model routing does not change the requested size. Preserve a supported explicit size; `auto` omits the size field and lets the provider choose. Do not send `reasoning`, `stream`, `tools`, or the old `--reasoning-effort` option.
+For new generation, a saved Prompt containing `4k` anywhere, ignoring case, selects `gpt-image-2-4k`; otherwise use `gpt-image-2-2k`, unless the user explicitly chooses a model through `--model`. Preserve the user's explicit `4k` requirement without adding it to unrelated requests. Omit `quality` for both models. Do not send `reasoning`, `stream`, `tools`, or the old `--reasoning-effort` option.
+
+For follow-up editing, inherit the base image's previous model and size unless the user explicitly changes them. Do not interpret omission of `4k` from a follow-up as permission to downgrade. Each successful output has a sibling `<output.png>.imagegen.json` job record; keep it with the PNG. The runtime reads only the first `--image` base image's matching record, not logo/style references. Explicit `--model` overrides Prompt keywords and inheritance; otherwise a `4k` Prompt upgrades to 4K, then the base record supplies the model, and only an unknown source defaults to 2K with a warning. Omitted `--size` inherits the previous explicit requested size, or actual PNG dimensions if the previous request used `auto`; explicit `--size`, including `auto`, overrides inheritance.
+
+For older images or built-in outputs without a record, recover model and size from previous task results/conversation and pass them explicitly. Never infer the model from pixel dimensions, silently lose known 4K settings, or insert fake `4k` keywords to control routing. If settings cannot be recovered and preserving them matters, ask a minimal clarification before requesting an image. Invalid/mismatched records or unsupported inherited dimensions fail locally with `E_EDIT_SETTINGS`; resolve the issue or pass both user-authorized `--model` and `--size`, never automatically fall back to 2K or `auto`.
 
 Read the active provider's `base_url` and bearer credential from `~/.codex/config.toml`. The runtime accepts `experimental_bearer_token` or `api_key` from that provider section; it never hardcodes a host or credential.
 
@@ -153,10 +157,12 @@ Read [runtime-contract.md](references/runtime-contract.md), select the runtime o
 ```text
 <runtime> "<skill-dir>/scripts/imagegen.<ext>" preflight
 <runtime> "<skill-dir>/scripts/imagegen.<ext>" generate --prompt-file "<prompt-file>" --size "<size>" --out-dir "<outputs>"
-<runtime> "<skill-dir>/scripts/imagegen.<ext>" edit --prompt-file "<prompt-file>" --image "<base-image>" --image "<reference-image>" --size "<size>" --out-dir "<outputs>"
+<runtime> "<skill-dir>/scripts/imagegen.<ext>" edit --prompt-file "<prompt-file>" --image "<base-image>" --image "<reference-image>" --out-dir "<outputs>"
 ```
 
 For editing, make image roles explicit in the saved Prompt: for example, image 1 is the original/base and image 2 is the logo to place. Preserve the intended ordering in repeated `--image` arguments. Node.js uses built-in FormData; Python editing requires `requests`. Check/install that dependency before the authorized editing command, not after a failed request.
+
+Omit `--size` in follow-up edits to inherit settings; add `--model` and/or `--size` for explicit user changes or to preserve known settings when no record exists. Track the effective model, requested size, actual dimensions, and returned `job_record` path in each job result, including the multi-output ledger.
 
 For one requested image, launch exactly one foreground `generate` or `edit` command with `timeout_ms: 660000` or greater. The runtime owns the sole technical retry. After command failure, stop the pass. Do not automatically rerun the command, switch runtimes, revise the Prompt, or attempt another fallback within the same pass.
 
@@ -196,10 +202,13 @@ Confirm only that the file exists, has a valid PNG signature and dimensions, and
 Report:
 
 - absolute output path, actual width and height, and execution route;
+- effective model, requested size, setting sources, and `job_record` path; preserve this context for later edits;
 - whether the runtime performed its internal technical retry;
 - any mismatch between requested size, provider metadata, and actual PNG dimensions; returned quality when reported by the provider;
 - unverified editing features when applicable;
 - unresolved limitations.
+
+For the configured API route, returned `quality` is provider metadata only: no `quality` was sent. If mentioning it, say “Provider returned quality=low; this request did not specify quality.” Never claim “requested high,” a quality mismatch, a downgrade, or worse visual quality based solely on that label or on Prompt words such as “high resolution.” Model tier and PNG resolution are separate from the provider's quality label.
 
 Do not claim artifact-free output or lossless editing when no visual review was requested. Do not claim success when the file is missing or invalid.
 

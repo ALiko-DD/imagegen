@@ -433,7 +433,7 @@ node imagegen/scripts/imagegen.mjs verify \
 
 `prompt-check` 只做结构校验，返回的 `semantic_review_required: true` 表示仍需人工或 Agent 完成语义审查。`--dry-run` 不是生成结果。
 
-提示词包含 `4k`（不区分大小写，包含 `4K`）时，使用 `gpt-image-2-4k`；否则使用 `gpt-image-2-2k`，生成与编辑均保留此规则。4K 编辑尚未经真实接口验证，脚本会提示这一限制。模型切换不改写提示词或尺寸。请求完全省略 `quality` 字段，由服务商采用默认质量。新接口不支持 `--reasoning-effort`；旧调用传入该参数会在本地报错。`--size auto` 会省略请求的 `size` 字段。
+新生成任务的提示词包含 `4k`（不区分大小写，包含 `4K`）时，使用 `gpt-image-2-4k`；否则默认使用 `gpt-image-2-2k`。可用 `--model gpt-image-2-2k` 或 `--model gpt-image-2-4k` 显式选择，优先于提示词关键词。后续编辑默认继承原图任务记录中的模型和尺寸，不会仅因新提示词省略 `4k` 而降为 2K。4K 编辑尚未经真实接口验证，脚本会提示这一限制。请求完全省略 `quality` 字段，由服务商采用默认质量。新接口不支持 `--reasoning-effort`；旧调用传入该参数会在本地报错。显式 `--size auto` 会省略请求的 `size` 字段，并覆盖尺寸继承。
 
 ### 支持尺寸
 
@@ -475,13 +475,20 @@ experimental_bearer_token = "replace-with-your-token"
 
 文字生成调用 `/images/generations`；需要参考图片或修改原图时使用 `edit`，调用 `/images/edits`。如果 `base_url` 已以 `/v1` 结尾，则只追加相应的 `/images/...` 路径，避免重复 `/v1`。密钥优先读取同一服务商节的 `experimental_bearer_token`，该字段缺失或为空时读取 `api_key`；不读取环境变量或其他服务商的密钥。
 
-生成请求为普通 JSON，编辑请求为 `multipart/form-data`；两者都包含按提示词选择的 `model`、原始 Prompt 和可选 `size`，不包含 `quality` 字段。编辑使用重复的 `image[]` 字段上传真实文件内容，由 HTTP 库生成 Content-Type 和 boundary。响应仍为 JSON，脚本从 `data[0].b64_json` 解码并校验 PNG 后保存，不把 JSON 直接存成图片。实际尺寸以 PNG 内容为准，尺寸不一致时会如实提示；返回的 `quality` 仅作为服务商元数据报告。`preflight` 和 `--dry-run` 均不发起真实图片请求。
+生成请求为普通 JSON，编辑请求为 `multipart/form-data`；两者都包含按显式设置、提示词或继承记录解析的 `model`、原始 Prompt 和可选 `size`，不包含 `quality` 字段。编辑使用重复的 `image[]` 字段上传真实文件内容，由 HTTP 库生成 Content-Type 和 boundary。响应仍为 JSON，脚本从 `data[0].b64_json` 解码并校验 PNG 后保存，不把 JSON 直接存成图片。实际尺寸以 PNG 内容为准，尺寸不一致时会如实提示；返回的 `quality` 仅作为服务商元数据报告。`preflight` 和 `--dry-run` 均不发起真实图片请求。
 
 > [!CAUTION]
 > 不要提交真实的 `experimental_bearer_token`，不要在问题、日志、截图或 Prompt 中泄露令牌。运行时会尽量隐藏令牌、授权头、完整配置和完整 Prompt，但仓库发布者仍应自行检查提交内容。
 
 ## 参考图编辑
 
+服务返回的 `quality: low`、`medium` 或 `high` 仅作为元数据报告；本脚本没有发送 `quality`，所以不存在“与请求的 high 不一致”。提示词中的“高分辨率”也不等于 API 的 `quality: high`，不能仅凭该标记认定图片质量降低或 4K 变成 2K。
+
+- **后续编辑不默认降级**：每次成功生成或编辑会保存 `<图片路径>.imagegen.json` 任务记录；将 PNG 和记录一起保留或搬移。编辑自动读取第一张 `--image` 原图的记录，不读取后续 logo 或风格图的记录。不必每轮重复写 `4k`。
+- 模型优先级为显式 `--model` → 提示词 `4k` → 原图记录 → 默认 2K。尺寸优先级为显式 `--size` → 原任务明确请求的尺寸 → 原任务使用 `auto` 时的实际 PNG 尺寸 → 无记录时的 `auto`。例如原先请求 `3840x2160`，后续未要求改尺寸就继续请求该尺寸；最终仍校验并报告实际返回值。
+- 普通后续编辑可省略 `--model` 和 `--size`：`node imagegen/scripts/imagegen.mjs edit --prompt-file ./edit-prompt.md --image ./outputs/original.png --image ./logo.png --out ./outputs/edited.png`。用户明确要求改用 2K 时传 `--model gpt-image-2-2k`，需要改变尺寸时传新的 `--size`。
+- 旧版本图片或内置工具输出可能没有记录：Agent 必须从此前结果或对话恢复已知模型和尺寸并显式传入；不能仅凭像素尺寸推断模型。无法确认且保留原设置很重要时先询问。无记录且没有明确模型时会提示默认 2K；记录损坏、图片哈希不匹配或继承尺寸不支持时返回 `E_EDIT_SETTINGS`，不静默降级。明确指定 `--model` 和 `--size` 可绕过继承。
+- 记录仅含模型、请求/实际尺寸、图片 SHA-256 和版本，不含密钥或完整提示词。摘要给出 `job_record` 路径及设置来源。默认禁止覆盖已有记录；记录写入失败会报告 PNG 已保存的部分结果，不自动重发请求。
 - `edit` 支持重复 `--image`，按输入顺序上传。例如第一张是原图，第二张是 logo；Prompt 文件应明确这些图片角色和修改范围。
 - 本地要求 1–16 张 PNG、JPEG 或 WebP，每张不超过 50 MiB；这是脚本保护规则，不代表服务商上限。文件缺失、无法读取或格式不符时，本地返回 `E_EDIT_INPUT`。
 - 用户已真实验证 `gpt-image-2-2k` 的重复 PNG 上传编辑，HTTP 200 返回解码后为有效的 2048×2048 PNG。其他模型（包括 4K 编辑）、mask 和流式编辑尚未实测，不宣称已验证。

@@ -119,13 +119,14 @@ function parseArgs(argv) {
     images: [],
     force: false,
     dryRun: false,
-    size: "auto",
+    size: null,
     mode: command === "edit" ? "edit" : "generate",
   };
   const valueOptions = new Map([
     ["--prompt-file", "promptFile"],
     ["--mode", "mode"],
     ["--size", "size"],
+    ["--model", "model"],
     ["--out", "out"],
     ["--out-dir", "outDir"],
     ["--image", "images"],
@@ -161,7 +162,12 @@ function parseArgs(argv) {
     }
   }
 
-  validateSize(options.size);
+  if (options.size !== null) {
+    validateSize(options.size);
+  }
+  if (options.model !== undefined && ![MODEL, MODEL_4K].includes(options.model)) {
+    throwSkill("E_RUNTIME", "--model must be gpt-image-2-2k or gpt-image-2-4k.");
+  }
 
 
   if (!new Set(["generate", "edit"]).has(options.mode)) {
@@ -454,12 +460,82 @@ function buildEndpoint(baseUrl, mode = "generate") {
     : `${trimmed}${suffix}`;
 }
 
-function buildPayload(promptText, mode, size) {
+function buildPayload(promptText, mode, size, model = null) {
   return {
-    model: /4k/i.test(promptText) ? MODEL_4K : MODEL,
+    model: model ?? (/4k/i.test(promptText) ? MODEL_4K : MODEL),
     prompt: promptText,
     ...(size !== "auto" ? { size } : {}),
   };
+}
+
+async function resolveSettings(options, promptText, images) {
+  let record = null;
+  let sourceRecord = null;
+  if (options.command === "edit" && !(options.model && options.size !== null)) {
+    const candidate = `${images[0].path}.imagegen.json`;
+    let text;
+    try {
+      text = await fsp.readFile(candidate, "utf8");
+    } catch (error) {
+      if (error.code !== "ENOENT") {
+        throwSkill("E_EDIT_SETTINGS", "Could not read the base image job record. Specify both --model and --size to override inheritance.");
+      }
+    }
+    if (text !== undefined) {
+      try {
+        record = JSON.parse(text);
+        const dimensions = verifyPngBytes(images[0].bytes);
+        if (record?.version !== 1 || ![MODEL, MODEL_4K].includes(record.model)
+          || record.image_sha256 !== crypto.createHash("sha256").update(images[0].bytes).digest("hex")
+          || record.width !== dimensions.width || record.height !== dimensions.height
+          || (record.requested_size !== null && typeof record.requested_size !== "string")) {
+          throw new Error("Invalid record");
+        }
+        if (record.requested_size === "auto") {
+          throw new Error("Invalid requested size");
+        }
+        if (record.requested_size !== null) {
+          validateSize(record.requested_size);
+        }
+        sourceRecord = candidate;
+      } catch {
+        throwSkill("E_EDIT_SETTINGS", "Base image job record is invalid or does not match the image. Specify both --model and --size to override inheritance.");
+      }
+    }
+  }
+  const prompt4k = /4k/i.test(promptText);
+  const model = options.model ?? (prompt4k ? MODEL_4K : record?.model ?? MODEL);
+  const modelSource = options.model ? "explicit" : prompt4k ? "prompt_4k" : record ? "base_record" : "default";
+  let size = options.size ?? (record ? record.requested_size ?? `${record.width}x${record.height}` : "auto");
+  try {
+    size = validateSize(size);
+  } catch (error) {
+    if (options.size === null && record) {
+      throwSkill("E_EDIT_SETTINGS", "Inherited image dimensions are unsupported. Specify --size explicitly; dimensions will not be silently reduced.");
+    }
+    throw error;
+  }
+  return {
+    model, size,
+    selection: { model_source: modelSource, size_source: options.size !== null ? "explicit" : record ? "base_record" : "default", source_record: sourceRecord },
+    warnings: options.command === "edit" && modelSource === "default"
+      ? ["No base image model record was found. Defaulting to 2K; use --model to preserve a model known from earlier context. Image dimensions do not identify the original model."] : [],
+  };
+}
+
+async function writeJobRecord(outputPath, payload, imageBytes, dimensions, force) {
+  const recordPath = `${outputPath}.imagegen.json`;
+  const record = {
+    version: 1, model: payload.model, requested_size: payload.size ?? null,
+    width: dimensions.width, height: dimensions.height,
+    image_sha256: crypto.createHash("sha256").update(imageBytes).digest("hex"),
+  };
+  try {
+    await fsp.writeFile(recordPath, `${JSON.stringify(record, null, 2)}\n`, { flag: force ? "w" : "wx" });
+  } catch (error) {
+    throwSkill("E_WRITE", `PNG saved, but its job record could not be written: ${safeText(error.message)}`, { networkRequestPerformed: true });
+  }
+  return recordPath;
 }
 
 function detectImageMime(bytes) {
@@ -860,7 +936,7 @@ async function runPreflight(options) {
       text_decoder: typeof TextDecoder === "function",
     },
     model: MODEL,
-    model_selection: { default: MODEL, contains_4k: MODEL_4K, case_sensitive: false },
+    model_selection: { default: MODEL, contains_4k: MODEL_4K, case_sensitive: false, explicit_option: "--model", edit_inherits_base_record: true },
     endpoint_path: ENDPOINT_PATH,
     edit_endpoint_path: EDIT_ENDPOINT_PATH,
     supported_api_modes: ["generate", "edit"],
@@ -897,13 +973,14 @@ async function runGenerateOrEdit(options) {
   const prompt = await readPrompt(options.promptFile, mode);
   const config = await readConfig();
   const images = mode === "edit" ? await loadInputImages(options.images) : [];
-  const payload = buildPayload(prompt.text, mode, options.size);
+  const settings = await resolveSettings(options, prompt.text, images);
+  const payload = buildPayload(prompt.text, mode, settings.size, settings.model);
 
   const summary = requestSummary(payload, mode, images);
   const outputPath = resolveOutputPath(options);
   await ensureWritableDirectory(path.dirname(outputPath));
-  if (!options.force && fs.existsSync(outputPath)) {
-    throwSkill("E_WRITE", `Output file already exists: ${outputPath}`);
+  if (!options.force && (fs.existsSync(outputPath) || fs.existsSync(`${outputPath}.imagegen.json`))) {
+    throwSkill("E_WRITE", `Output PNG or job record already exists: ${outputPath}`);
   }
 
   if (options.dryRun) {
@@ -913,13 +990,14 @@ async function runGenerateOrEdit(options) {
       runtime: runtimeName(),
       model: payload.model,
       requested_size: payload.size ?? null,
+      settings_selection: settings.selection,
       prompt_file: prompt.promptFile,
       prompt_characters: prompt.characters,
       output_path: outputPath,
       request_summary: summary,
 
       network_request_performed: false,
-      warnings: editWarnings(payload, mode),
+      warnings: [...settings.warnings, ...editWarnings(payload, mode)],
     };
   }
 
@@ -927,12 +1005,15 @@ async function runGenerateOrEdit(options) {
   const imageBytes = decodeBase64Strict(response.imageBase64);
   verifyPngBytes(imageBytes);
   const written = await writePng(outputPath, imageBytes, options.force);
+  const jobRecord = await writeJobRecord(outputPath, payload, imageBytes, written, options.force);
   return {
     status: "ok",
     command: mode,
     runtime: runtimeName(),
     model: payload.model,
     requested_size: payload.size ?? null,
+    settings_selection: settings.selection,
+    job_record: jobRecord,
     provider_metadata: response.metadata,
     output_path: outputPath,
     width: written.width,
@@ -944,7 +1025,7 @@ async function runGenerateOrEdit(options) {
 
     attempts: response.attempts,
     network_request_performed: true,
-    warnings: [...response.warnings, ...editWarnings(payload, mode)],
+    warnings: [...response.warnings, ...settings.warnings, ...editWarnings(payload, mode)],
   };
 }
 

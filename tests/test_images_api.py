@@ -80,7 +80,7 @@ class ImagesAPITests(unittest.TestCase):
         self.server.server_close()
         self.thread.join()
 
-    def invoke(self, runtime, suffix="", credential="experimental_bearer_token", extra=(), command="generate", images=None, empty_primary=False):
+    def invoke(self, runtime, suffix="", credential="experimental_bearer_token", extra=(), command="generate", images=None, empty_primary=False, size="1536x1024"):
         name, prefix = runtime
         base_url = f"http://127.0.0.1:{self.server.server_port}{suffix}"
         credential_text = 'experimental_bearer_token = ""\napi_key = "test-only-key"' if empty_primary else f'{credential} = "test-only-key"'
@@ -93,7 +93,10 @@ class ImagesAPITests(unittest.TestCase):
         environment.update(HOME=str(self.fake_home), USERPROFILE=str(self.fake_home), PYTHONDONTWRITEBYTECODE="1", NO_PROXY="127.0.0.1,localhost", no_proxy="127.0.0.1,localhost")
         self.invocations += 1
         output = self.workspace / f"{name}-{self.invocations}.png"
-        arguments = [*prefix, command, "--prompt-file", str(self.prompt), "--size", "1536x1024", "--out", str(output), *extra]
+        arguments = [*prefix, command, "--prompt-file", str(self.prompt), "--out", str(output)]
+        if size is not None:
+            arguments.extend(["--size", size])
+        arguments.extend(extra)
         if command == "edit":
             for image in ([self.original, self.logo] if images is None else images):
                 arguments.extend(["--image", str(image)])
@@ -148,6 +151,26 @@ class ImagesAPITests(unittest.TestCase):
                     self.assertEqual(headers["Accept"], "application/json")
                     self.assertEqual(payload, {"model": "gpt-image-2-2k", "prompt": self.prompt.read_text(encoding="utf-8"), "size": "1536x1024"})
                     self.assertNotIn("quality", payload)
+
+    def test_returned_quality_is_metadata_not_a_request_or_warning(self):
+        image_bytes = self.png_bytes(1024, 1024, 80)
+        for runtime in RUNTIMES:
+            for command in ("generate", "edit"):
+                for model in ("gpt-image-2-2k", "gpt-image-2-4k"):
+                    for quality in ("low", "medium", "high"):
+                        with self.subTest(runtime=runtime[0], command=command, model=model, quality=quality):
+                            self.server.responses = [(200, {"data": [{"b64_json": base64.b64encode(image_bytes).decode()}], "quality": quality, "size": "1024x1024", "model": model})]
+                            result, report, output = self.invoke(runtime, command=command, size="1024x1024", extra=["--model", model])
+                            self.assertEqual(result.returncode, 0, result.stderr)
+                            self.assertEqual(report["provider_metadata"]["quality"], quality)
+                            self.assertNotIn("requested_quality", report)
+                            self.assertFalse(any("quality" in warning.lower() for warning in report["warnings"]))
+                            if command == "generate":
+                                self.assertEqual(report["warnings"], [])
+                                self.assertNotIn("quality", self.server.requests[-1][2])
+                            else:
+                                self.assert_edit_upload(self.server.requests[-1], model, "1024x1024")
+                            self.assertTrue(output.is_file())
 
     def test_retries_only_eligible_failures(self):
         for runtime in RUNTIMES:
@@ -226,18 +249,22 @@ class ImagesAPITests(unittest.TestCase):
                 else:
                     self.assertEqual(result.returncode, 0, result.stderr)
 
-    def assert_edit_upload(self, request, expected_model="gpt-image-2-2k"):
+    def assert_edit_upload(self, request, expected_model="gpt-image-2-2k", expected_size="1536x1024", expected_images=None):
         request_path, headers, parts = request
         self.assertTrue(request_path.endswith("/v1/images/edits"))
         self.assertEqual(headers["Authorization"], "Bearer test-only-key")
         self.assertIn("boundary=", headers["Content-Type"])
         fields = {part["name"]: part["bytes"].decode("utf-8") for part in parts if part["filename"] is None}
-        self.assertEqual(fields, {"model": expected_model, "prompt": self.prompt.read_text(encoding="utf-8"), "size": "1536x1024"})
+        expected_fields = {"model": expected_model, "prompt": self.prompt.read_text(encoding="utf-8")}
+        if expected_size is not None:
+            expected_fields["size"] = expected_size
+        self.assertEqual(fields, expected_fields)
         files = [part for part in parts if part["filename"] is not None]
-        self.assertEqual([part["name"] for part in files], ["image[]", "image[]"])
-        self.assertEqual([part["filename"] for part in files], ["original.png", "logo.png"])
-        self.assertEqual([part["mime"] for part in files], ["image/png", "image/png"])
-        self.assertEqual([part["bytes"] for part in files], [self.original.read_bytes(), self.logo.read_bytes()])
+        expected_images = [self.original, self.logo] if expected_images is None else expected_images
+        self.assertEqual([part["name"] for part in files], ["image[]"] * len(expected_images))
+        self.assertEqual([part["filename"] for part in files], [image.name for image in expected_images])
+        self.assertEqual([part["mime"] for part in files], ["image/png"] * len(expected_images))
+        self.assertEqual([part["bytes"] for part in files], [image.read_bytes() for image in expected_images])
 
     def test_edit_multipart_files_and_output(self):
         self.prompt.write_text("第一张是待修改原图，第二张是 logo。将 logo 放在右下角，保留原图主体和 logo 字样。", encoding="utf-8")
@@ -319,6 +346,115 @@ class ImagesAPITests(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assert_edit_upload(self.server.requests[0], "gpt-image-2-4k")
                 self.assertTrue(any("not been live-verified" in warning for warning in report["warnings"]))
+
+    def test_4k_edit_inheritance_across_runtimes_and_multiple_edits(self):
+        image_bytes = self.png_bytes(3840, 2160, 70)
+        response = {"data": [{"b64_json": base64.b64encode(image_bytes).decode()}]}
+        for generation_runtime in RUNTIMES:
+            self.prompt.write_text("Generate a landscape image in 4K.", encoding="utf-8")
+            self.server.responses = [(200, response)]
+            result, report, base = self.invoke(generation_runtime, size="3840x2160")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            record_path = Path(report["job_record"])
+            record = json.loads(record_path.read_text(encoding="utf-8"))
+            self.assertEqual(set(record), {"version", "model", "requested_size", "width", "height", "image_sha256"})
+            self.assertEqual(record["model"], "gpt-image-2-4k")
+            self.assertEqual(record["image_sha256"], hashlib.sha256(base.read_bytes()).hexdigest())
+            for edit_runtime in RUNTIMES:
+                with self.subTest(generation=generation_runtime[0], edit=edit_runtime[0]):
+                    previous = base
+                    for unused in range(2):
+                        self.prompt.write_text("Add the logo from the second image in the bottom-right corner of the first image.", encoding="utf-8")
+                        self.server.responses = [(200, response)]
+                        result, report, output = self.invoke(edit_runtime, command="edit", images=[previous, self.logo], size=None)
+                        self.assertEqual(result.returncode, 0, result.stderr)
+                        self.assertEqual(report["model"], "gpt-image-2-4k")
+                        self.assertEqual(report["requested_size"], "3840x2160")
+                        self.assertEqual(report["settings_selection"]["model_source"], "base_record")
+                        self.assertEqual(report["settings_selection"]["size_source"], "base_record")
+                        self.assert_edit_upload(self.server.requests[-1], "gpt-image-2-4k", "3840x2160", [previous, self.logo])
+                        self.assertTrue(Path(report["job_record"]).is_file())
+                        previous = output
+
+    def test_edit_settings_explicit_override_and_prompt_upgrade(self):
+        record_path = Path(str(self.original) + ".imagegen.json")
+        for runtime in RUNTIMES:
+            for inherited_model, marker, options, expected_model, expected_size in (
+                ("gpt-image-2-4k", "4K", ["--model", "gpt-image-2-2k", "--size", "2048x2048"], "gpt-image-2-2k", "2048x2048"),
+                ("gpt-image-2-2k", "4K", [], "gpt-image-2-4k", "2048x2048"),
+                ("gpt-image-2-4k", "", ["--size", "auto"], "gpt-image-2-4k", None),
+            ):
+                with self.subTest(runtime=runtime[0], options=options, marker=marker):
+                    record_path.write_text(json.dumps({"version": 1, "model": inherited_model, "requested_size": "2048x2048", "width": 1, "height": 1, "image_sha256": hashlib.sha256(self.original.read_bytes()).hexdigest()}), encoding="utf-8")
+                    self.prompt.write_text("Edit the first image using the second image as a logo. " + marker, encoding="utf-8")
+                    self.server.responses = [(200, self.success_response(expected_model))]
+                    result, report, output = self.invoke(runtime, command="edit", extra=options, size=None)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assert_edit_upload(self.server.requests[-1], expected_model, expected_size)
+
+    def test_invalid_or_stale_records_never_silently_downgrade(self):
+        record_path = Path(str(self.original) + ".imagegen.json")
+        valid = {"version": 1, "model": "gpt-image-2-4k", "requested_size": "3840x2160", "width": 1, "height": 1, "image_sha256": hashlib.sha256(self.original.read_bytes()).hexdigest()}
+        for runtime in RUNTIMES:
+            for record in ("{", "[]", json.dumps(dict(valid, image_sha256="stale")), json.dumps(dict(valid, model="other-model")), json.dumps(dict(valid, requested_size="4096x4096")), json.dumps(dict(valid, requested_size=None))):
+                with self.subTest(runtime=runtime[0], record=record):
+                    record_path.write_text(record, encoding="utf-8")
+                    self.server.requests = []
+                    result, report, output = self.invoke(runtime, command="edit", size=None)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertEqual(report["code"], "E_EDIT_SETTINGS")
+                    self.assertFalse(self.server.requests)
+                    self.assertFalse(output.exists())
+            self.server.responses = [(200, self.success_response())]
+            result, report, output = self.invoke(runtime, command="edit", size=None, extra=["--model", "gpt-image-2-2k", "--size", "2048x2048"])
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_auto_generation_record_inherits_actual_dimensions(self):
+        image_bytes = self.png_bytes(2048, 2048, 70)
+        response = {"data": [{"b64_json": base64.b64encode(image_bytes).decode()}]}
+        for runtime in RUNTIMES:
+            self.server.responses = [(200, response)]
+            result, report, base = self.invoke(runtime, size=None)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertNotIn("size", self.server.requests[-1][2])
+            self.server.responses = [(200, response)]
+            result, report, output = self.invoke(runtime, command="edit", size=None, images=[base, self.logo])
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(report["model"], "gpt-image-2-2k")
+            self.assertEqual(report["requested_size"], "2048x2048")
+            self.assert_edit_upload(self.server.requests[-1], "gpt-image-2-2k", "2048x2048", [base, self.logo])
+
+    def test_job_record_is_not_overwritten_by_default(self):
+        protected = self.workspace / "protected.png"
+        sidecar = Path(str(protected) + ".imagegen.json")
+        sidecar.write_text("existing record", encoding="utf-8")
+        for runtime in RUNTIMES:
+            self.server.requests = []
+            result, report, output = self.invoke(runtime, extra=["--out", str(protected)])
+            self.assertEqual(report["code"], "E_WRITE")
+            self.assertFalse(self.server.requests)
+            self.assertFalse(protected.exists())
+            self.assertEqual(sidecar.read_text(encoding="utf-8"), "existing record")
+
+    def test_only_base_record_controls_model_and_unknown_sources_are_reported(self):
+        self.original.write_bytes(self.png_bytes(3840, 2160, 70))
+        Path(str(self.logo) + ".imagegen.json").write_text(json.dumps({"version": 1, "model": "gpt-image-2-4k", "requested_size": "3840x2160", "width": 1, "height": 1, "image_sha256": hashlib.sha256(self.logo.read_bytes()).hexdigest()}), encoding="utf-8")
+        for runtime in RUNTIMES:
+            self.server.responses = [(200, self.success_response())]
+            result, report, output = self.invoke(runtime, command="edit", size=None)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assert_edit_upload(self.server.requests[-1], expected_size=None)
+            self.assertEqual(report["settings_selection"]["model_source"], "default")
+            self.assertTrue(any("No base image model record" in warning for warning in report["warnings"]))
+
+    def test_invalid_explicit_model_fails_before_requests(self):
+        for runtime in RUNTIMES:
+            self.server.requests = []
+            result, report, output = self.invoke(runtime, extra=["--model", "other-model"])
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(report["code"], "E_RUNTIME")
+            self.assertFalse(self.server.requests)
+            self.assertFalse(output.exists())
 
 
 if __name__ == "__main__":
