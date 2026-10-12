@@ -388,7 +388,7 @@ printf '选择的运行时：%s\n' "$selected_runtime"
 - Node.js 18+ 与 Python 3.8+ 至少必须有一个可用；这是安装成功的硬性条件。
 - 如果两者都不可用，安装或更新请求已经授权安装程序直接安装 Python 3.8+，默认优先 Python 3.12，不再单独询问用户是否安装。
 - 自动安装后必须刷新环境变量并重新检查版本；只有外部权限、管理员密码、UAC、网络或包管理器阻塞才需要用户介入。
-- 两个运行时均不要求安装第三方依赖。
+- Node.js 生成和编辑均使用内置能力；Python 生成不需要第三方依赖，Python 编辑需要 `requests`，缺失时在编辑前运行所选解释器的 `python -m pip install requests`。`preflight` 会报告该依赖是否可用。
 - Prompt 文件必须是严格 UTF-8、无 BOM；包含中文等非 ASCII 内容时，只通过 `--prompt-file` 传入。
 - 默认输出目录为当前工作目录下的 `outputs/`。
 
@@ -418,6 +418,14 @@ node imagegen/scripts/imagegen.mjs generate \
   --size 1024x1024 \
   --out-dir ./outputs
 
+# 参考图编辑；第一张为原图，第二张为 logo
+node imagegen/scripts/imagegen.mjs edit \
+  --prompt-file ./edit-prompt.md \
+  --image ./original.png \
+  --image ./logo.png \
+  --size 2048x2048 \
+  --out ./outputs/edited.png
+
 # 验证已有 PNG
 node imagegen/scripts/imagegen.mjs verify \
   --file ./outputs/result.png
@@ -425,7 +433,7 @@ node imagegen/scripts/imagegen.mjs verify \
 
 `prompt-check` 只做结构校验，返回的 `semantic_review_required: true` 表示仍需人工或 Agent 完成语义审查。`--dry-run` 不是生成结果。
 
-提示词包含 `4k`（不区分大小写，包含 `4K`）时，生成使用 `gpt-image-2-4k`；否则使用 `gpt-image-2-2k`。模型切换不改写提示词或尺寸。请求完全省略 `quality` 字段，由服务商采用默认质量。新接口不支持 `--reasoning-effort`；旧调用传入该参数会在本地报错。`--size auto` 会省略请求的 `size` 字段。
+提示词包含 `4k`（不区分大小写，包含 `4K`）时，使用 `gpt-image-2-4k`；否则使用 `gpt-image-2-2k`，生成与编辑均保留此规则。4K 编辑尚未经真实接口验证，脚本会提示这一限制。模型切换不改写提示词或尺寸。请求完全省略 `quality` 字段，由服务商采用默认质量。新接口不支持 `--reasoning-effort`；旧调用传入该参数会在本地报错。`--size auto` 会省略请求的 `size` 字段。
 
 ### 支持尺寸
 
@@ -462,20 +470,22 @@ experimental_bearer_token = "replace-with-your-token"
 
 ```text
 {base_url}/v1/images/generations
+{base_url}/v1/images/edits
 ```
 
-如果 `base_url` 已以 `/v1` 结尾，则只追加 `/images/generations`，避免重复 `/v1`。密钥优先读取同一服务商节的 `experimental_bearer_token`，该字段缺失或为空时读取 `api_key`；不读取环境变量或其他服务商的密钥。
+文字生成调用 `/images/generations`；需要参考图片或修改原图时使用 `edit`，调用 `/images/edits`。如果 `base_url` 已以 `/v1` 结尾，则只追加相应的 `/images/...` 路径，避免重复 `/v1`。密钥优先读取同一服务商节的 `experimental_bearer_token`，该字段缺失或为空时读取 `api_key`；不读取环境变量或其他服务商的密钥。
 
-请求为普通 JSON，只包含按提示词选择的 `model`、原始 Prompt 和可选 `size`，不包含 `quality` 字段。脚本从返回的 `data[0].b64_json` 解码 PNG，不再解析 SSE。实际尺寸以 PNG 内容为准，尺寸不一致时会如实提示；返回的 `quality` 仅作为服务商元数据报告。`preflight` 和 `--dry-run` 均不发起真实图片请求。
+生成请求为普通 JSON，编辑请求为 `multipart/form-data`；两者都包含按提示词选择的 `model`、原始 Prompt 和可选 `size`，不包含 `quality` 字段。编辑使用重复的 `image[]` 字段上传真实文件内容，由 HTTP 库生成 Content-Type 和 boundary。响应仍为 JSON，脚本从 `data[0].b64_json` 解码并校验 PNG 后保存，不把 JSON 直接存成图片。实际尺寸以 PNG 内容为准，尺寸不一致时会如实提示；返回的 `quality` 仅作为服务商元数据报告。`preflight` 和 `--dry-run` 均不发起真实图片请求。
 
 > [!CAUTION]
 > 不要提交真实的 `experimental_bearer_token`，不要在问题、日志、截图或 Prompt 中泄露令牌。运行时会尽量隐藏令牌、授权头、完整配置和完整 Prompt，但仓库发布者仍应自行检查提交内容。
 
-## 编辑限制
+## 参考图编辑
 
-- 当前提供的 `/v1/images/generations` 只用于文生图，未提供图片编辑协议。
-- 脚本 `edit` 命令（含 `--dry-run`）会在本地返回 `E_EDIT_UNSUPPORTED`，不发送请求。
-- 参考图编辑仍可通过真实可调用的内置编辑工具完成；脚本编辑需要另行提供接口说明。
+- `edit` 支持重复 `--image`，按输入顺序上传。例如第一张是原图，第二张是 logo；Prompt 文件应明确这些图片角色和修改范围。
+- 本地要求 1–16 张 PNG、JPEG 或 WebP，每张不超过 50 MiB；这是脚本保护规则，不代表服务商上限。文件缺失、无法读取或格式不符时，本地返回 `E_EDIT_INPUT`。
+- 用户已真实验证 `gpt-image-2-2k` 的重复 PNG 上传编辑，HTTP 200 返回解码后为有效的 2048×2048 PNG。其他模型（包括 4K 编辑）、mask 和流式编辑尚未实测，不宣称已验证。
+- 编辑保留超时、最多一次符合条件的技术重试、凭证保护和禁止默认覆盖；失败不会静默改成文字生成。
 - 不承诺无损编辑、完全无伪影或绝对保持所有像素；仅在用户要求质量审查时进行目视检查。
 
 ## 项目结构
@@ -509,7 +519,7 @@ experimental_bearer_token = "replace-with-your-token"
 - 视觉控制按实际角色限定范围，不使用空泛的 `8K`、`masterpiece`、`HDR` 等质量词堆叠。
 - 不使用 SVG、HTML、Canvas、Pillow 或程序绘图伪造图像生成结果。
 - 不通过回退路由绕过安全、内容、权限或政策拒绝。
-- 每个独立输出只执行一次生成命令；多图可按受控调度执行多个任务，失败后不会自动换运行时、改 Prompt 或重新发起另一轮。
+- 每个独立输出只执行一次生成或编辑命令；多图可按受控调度执行多个任务，失败后不会自动换运行时、改 Prompt 或重新发起另一轮。
 
 ## 本地验证
 

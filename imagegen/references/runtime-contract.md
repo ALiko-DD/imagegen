@@ -4,6 +4,8 @@
 
 Use `scripts/imagegen.mjs` with Node.js 18 or newer. Use `scripts/imagegen.py` with Python 3.8 or newer only when Node.js is unavailable or too old. Select once during preflight; do not install dependencies or switch runtimes after a generation command fails.
 
+Node.js generation and editing use built-in APIs without external packages. Python generation uses the standard library; Python editing additionally requires `requests` for HTTP-library-generated multipart encoding. Check with `python -c "import requests"`; if missing, install it with the selected interpreter's `python -m pip install requests` before editing. Preflight reports availability. A missing dependency fails locally with `E_RUNTIME` and sends no request.
+
 Pass non-ASCII Prompt content only through a strict UTF-8 Prompt file. Never pass it through command arguments, environment variables, shell here-strings, stdin, or generated shell source.
 
 ## Commands
@@ -12,7 +14,7 @@ Pass non-ASCII Prompt content only through a strict UTF-8 Prompt file. Never pas
 preflight
 prompt-check --prompt-file <path> [--mode generate|edit]
 generate --prompt-file <path> [--size <size>] [--out <png> | --out-dir <dir>] [--force] [--dry-run]
-edit --prompt-file <path> --image <path>  (returns E_EDIT_UNSUPPORTED locally)
+edit --prompt-file <path> --image <path> [--image <path> ...] [--size <size>] [--out <png> | --out-dir <dir>] [--force] [--dry-run]
 verify --file <png>
 self-test
 ```
@@ -48,7 +50,7 @@ If a user explicitly requests 4K and a clear ratio, choose the corresponding 4K 
 
 ## Execution timeout
 
-Each Node and Python HTTP attempt may remain open for 600 seconds. Launch `generate` with an outer command-runner timeout of at least `660000` milliseconds. When the shell exposes `timeout_ms`, set `timeout_ms: 660000` instead of accepting a default `120000` millisecond limit.
+Each Node and Python HTTP attempt may remain open for 600 seconds. Launch `generate` and `edit` with an outer command-runner timeout of at least `660000` milliseconds. When the shell exposes `timeout_ms`, set `timeout_ms: 660000` instead of accepting a default `120000` millisecond limit.
 
 The outer limit leaves one minute for image validation, writing, re-reading, and the final JSON summary. `preflight`, `prompt-check`, and `verify` do not require it.
 
@@ -56,11 +58,11 @@ For two or more independent outputs, apply that minimum to every job process, no
 
 ## Multi-output scheduling
 
-Keep the single-output path unchanged. For two or more independent outputs, the main agent must finish and structurally check every Prompt before any image request starts. Build a ledger in requested order with a stable unique job ID, one Prompt file, mode, size, one unique explicit `.png` output path, process handle, state, and result. Reject duplicate IDs or outputs, existing output files, and any unresolved dependency before launch; do not use `--force`.
+Keep the single-output path unchanged. For two or more independent outputs, the main agent must finish and structurally check every Prompt before any image request starts. Build a ledger in requested order with a stable unique job ID, one Prompt file, mode, ordered reference-image paths when editing, size, one unique explicit `.png` output path, process handle, state, and result. Reject duplicate IDs or outputs, existing output files, and any unresolved dependency before launch; do not use `--force`.
 
 Use only a managed execution facility that can retain process handles and collect each command's final stdout, stderr, and exit state. Start the first job immediately. Start each later job at least 10,000 milliseconds after the previous actual start without waiting for that job to finish, while limiting active image jobs to five. If five are active, wait for a slot and still enforce the global 10,000-millisecond start interval. Immediately before launching, require ledger state `not_started` and an absent output, then record `running` plus the process handle before considering another launch.
 
-Each configured job is exactly one `generate` invocation and retains the complete single-image JSON, PNG, timeout, output, and retry contract. A job failure settles only that item; it does not cancel or rerun siblings. After all handles settle, return one ordered, sanitized summary covering every job. If reliable managed overlap and collection are unavailable, run the independent jobs serially and report the degradation; never use untracked detached commands or claim concurrency.
+Each configured job is exactly one `generate` or `edit` invocation and retains the complete single-image JSON-response, PNG, timeout, output, and retry contract. A job failure settles only that item; it does not cancel or rerun siblings. After all handles settle, return one ordered, sanitized summary covering every job. If reliable managed overlap and collection are unavailable, run the independent jobs serially and report the degradation; never use untracked detached commands or claim concurrency.
 
 Never schedule dependencies together. In particular, complete and verify a reference-image baseline edit before launching any independent series outputs that consume it.
 
@@ -77,9 +79,9 @@ Do not fall back to another provider, workspace configuration, environment varia
 
 ## Request
 
-POST to the configured base URL plus `/v1/images/generations`. If the base URL already ends with `/v1` (optionally followed by a slash), append only `/images/generations`. Preserve other configured path prefixes. Reject embedded credentials, query strings, and fragments. Do not hardcode the hostname.
+POST text-only generation to the configured base URL plus `/v1/images/generations`, and reference-image editing to `/v1/images/edits`. If the base URL already ends with `/v1` (optionally followed by a slash), append only `/images/generations` or `/images/edits`. Preserve other configured path prefixes. Reject embedded credentials, query strings, and fragments. Do not hardcode the hostname.
 
-Headers:
+Generation headers:
 
 ```text
 Authorization: Bearer <configured credential>
@@ -102,7 +104,15 @@ Omit `size` when the CLI selects `auto`. Always omit `quality`; do not replace i
 
 ## Editing
 
-The supplied endpoint documents text-to-image generation only. The script's `edit` entrypoint returns `E_EDIT_UNSUPPORTED` before reading input files or sending any request, including with `--dry-run`. Reference-image editing can still use a callable built-in editor. A configured edit route requires its own supplied API contract; never invent an `/images/edits` request.
+Use multipart/form-data for `/v1/images/edits`:
+
+- Include `model`, the exact saved `prompt`, and optional explicit `size`; always omit `quality`.
+- Read each repeated CLI `--image` file and upload its real binary contents under a repeated `image[]` field, with filename and detected MIME type. Preserve input order; do not send paths, URLs, or Base64 text as the file contents.
+- Let the HTTP library generate Content-Type and its boundary. Node uses FormData/Blob with fetch; Python uses `requests.Request(..., data=fields, files=[("image[]", ...), ...]).prepare()` and sends the library's encoded body and generated header with the existing urllib transport. Do not manually construct multipart delimiters.
+- Require 1–16 PNG, JPEG, or WebP files, each no larger than 50 MiB. These are local runtime guardrails, not a claim about the provider's maximum. Missing, unreadable, non-file, oversized, or unrecognized inputs fail locally with `E_EDIT_INPUT`.
+- Explain roles in the Prompt, such as “image 1 is the original/base; image 2 is the logo.” Never reorder references or silently fall back to generation on editing failure.
+- Dry-run validates and loads the ordered files, configuration, dependency, and destination but sends no network request.
+- The user supplied a successful live test of `gpt-image-2-2k` with repeated PNG uploads and a decoded 2048×2048 PNG. Preserve existing Prompt-based 4K selection, but report 4K edits as unverified. Other models, masks, and streaming editing have not been live-verified; no mask or streaming option is implemented.
 
 ## JSON response
 
@@ -152,7 +162,7 @@ E_CONFIG_KEY
 E_PROMPT_ENCODING
 E_PROMPT_LENGTH
 E_PROMPT_STRUCTURE
-E_EDIT_UNSUPPORTED
+E_EDIT_INPUT
 E_AUTH
 E_RATE_LIMIT
 E_HTTP

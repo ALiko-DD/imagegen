@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { spawnSync } from "node:child_process";
+import { Blob } from "node:buffer";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import fsp from "node:fs/promises";
@@ -10,6 +11,9 @@ import path from "node:path";
 const MODEL = "gpt-image-2-2k";
 const MODEL_4K = "gpt-image-2-4k";
 const ENDPOINT_PATH = "/v1/images/generations";
+const EDIT_ENDPOINT_PATH = "/v1/images/edits";
+const MAX_INPUT_IMAGES = 16;
+const MAX_INPUT_BYTES = 50 * 1024 * 1024;
 const MAX_PROMPT_CHARACTERS = 20_000;
 const RECOMMENDED_PROMPT_CHARACTERS = Object.freeze({ min: 200, max: 4_000 });
 const REQUEST_TIMEOUT_MS = 600_000;
@@ -169,7 +173,7 @@ function parseArgs(argv) {
     throwSkill("E_WRITE", "Use --out or --out-dir, not both.");
   }
   if (command === "generate" && options.images.length) {
-    throwSkill("E_EDIT_UNSUPPORTED", "The generation endpoint cannot accept reference images.");
+    throwSkill("E_EDIT_INPUT", "Use edit with --image for reference images; generate accepts text only.");
   }
   return options;
 }
@@ -438,17 +442,19 @@ async function readPrompt(promptFile, mode) {
   };
 }
 
-function buildEndpoint(baseUrl) {
+function endpointPath(mode) {
+  return mode === "edit" ? EDIT_ENDPOINT_PATH : ENDPOINT_PATH;
+}
+
+function buildEndpoint(baseUrl, mode = "generate") {
   const trimmed = baseUrl.replace(/\/+$/, "");
+  const suffix = endpointPath(mode);
   return /\/v1$/i.test(trimmed)
-    ? `${trimmed}/images/generations`
-    : `${trimmed}${ENDPOINT_PATH}`;
+    ? `${trimmed}${suffix.slice(3)}`
+    : `${trimmed}${suffix}`;
 }
 
 function buildPayload(promptText, mode, size) {
-  if (mode !== "generate") {
-    throwSkill("E_EDIT_UNSUPPORTED", "The configured Images API only documents generation. Use a callable built-in image editor or provide an edit API contract.");
-  }
   return {
     model: /4k/i.test(promptText) ? MODEL_4K : MODEL,
     prompt: promptText,
@@ -456,11 +462,72 @@ function buildPayload(promptText, mode, size) {
   };
 }
 
-function requestSummary(payload, mode) {
+function detectImageMime(bytes) {
+  if (bytes.length >= 8 && bytes.subarray(0, 8).equals(PNG_SIGNATURE)) {
+    return "image/png";
+  }
+  if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) {
+    return "image/jpeg";
+  }
+  if (bytes.length >= 12 && bytes.toString("ascii", 0, 4) === "RIFF" && bytes.toString("ascii", 8, 12) === "WEBP") {
+    return "image/webp";
+  }
+  throwSkill("E_EDIT_INPUT", "Reference images must contain PNG, JPEG, or WebP data.");
+}
+
+async function loadInputImages(imagePaths) {
+  if (!imagePaths.length || imagePaths.length > MAX_INPUT_IMAGES) {
+    throwSkill("E_EDIT_INPUT", "The edit command requires 1–16 --image files.");
+  }
+  const images = [];
+  for (const imagePath of imagePaths) {
+    const resolved = path.resolve(imagePath);
+    let bytes;
+    try {
+      const stat = await fsp.stat(resolved);
+      if (!stat.isFile() || stat.size > MAX_INPUT_BYTES) {
+        throwSkill("E_EDIT_INPUT", "Each reference image must be a file no larger than 50 MiB.");
+      }
+      bytes = await fsp.readFile(resolved);
+    } catch (error) {
+      if (error instanceof SkillError) {
+        throw error;
+      }
+      throwSkill("E_EDIT_INPUT", `Could not read reference image: ${safeText(error.message)}`);
+    }
+    if (bytes.length > MAX_INPUT_BYTES) {
+      throwSkill("E_EDIT_INPUT", "Each reference image must be no larger than 50 MiB.");
+    }
+    images.push({ path: resolved, filename: path.basename(resolved), mime: detectImageMime(bytes), bytes });
+  }
+  return images;
+}
+
+function buildMultipart(payload, images) {
+  const form = new FormData();
+  for (const [key, value] of Object.entries(payload)) {
+    form.append(key, value);
+  }
+  for (const image of images) {
+    form.append("image[]", new Blob([image.bytes], { type: image.mime }), image.filename);
+  }
+  return form;
+}
+
+function editWarnings(payload, mode) {
+  return mode === "edit" && payload.model !== MODEL
+    ? ["The user verified editing with gpt-image-2-2k only; 4K editing has not been live-verified."]
+    : [];
+}
+
+function requestSummary(payload, mode, images = []) {
   return {
     model: payload.model,
     size: payload.size ?? null,
-    endpoint_path: ENDPOINT_PATH,
+    endpoint_path: endpointPath(mode),
+    request_format: mode === "edit" ? "multipart/form-data" : "application/json",
+    input_image_count: images.length,
+    input_images: images.map((image) => ({ path: image.path, mime: image.mime, bytes: image.bytes.length })),
     mode,
     response_format: "json",
     prompt_sha256: crypto.createHash("sha256").update(payload.prompt, "utf8").digest("hex"),
@@ -698,19 +765,23 @@ function classifyRequestFailure(error) {
   };
 }
 
-async function requestOnce(config, payload) {
+async function requestOnce(config, payload, mode, images) {
+  const headers = {
+    Authorization: `Bearer ${config.token}`,
+    Accept: "application/json",
+    Connection: "keep-alive",
+  };
+  const body = mode === "edit" ? buildMultipart(payload, images) : JSON.stringify(payload);
+  if (mode !== "edit") {
+    headers["Content-Type"] = "application/json";
+  }
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
   try {
-    const response = await fetch(buildEndpoint(config.baseUrl), {
+    const response = await fetch(buildEndpoint(config.baseUrl, mode), {
       method: "POST",
-      headers: {
-        Authorization: `Bearer ${config.token}`,
-        "Content-Type": "application/json",
-        Accept: "application/json",
-        Connection: "keep-alive",
-      },
-      body: JSON.stringify(payload),
+      headers,
+      body,
       signal: controller.signal,
       redirect: "manual",
     });
@@ -743,12 +814,12 @@ async function requestOnce(config, payload) {
   }
 }
 
-async function requestImage(config, payload) {
+async function requestImage(config, payload, mode, images) {
   let lastError = null;
   for (let attempt = 0; attempt < 2; attempt += 1) {
     try {
       return {
-        ...(await requestOnce(config, payload)),
+        ...(await requestOnce(config, payload, mode, images)),
         attempts: attempt + 1,
       };
     } catch (error) {
@@ -785,12 +856,14 @@ async function runPreflight(options) {
     dependencies: {
       external_packages: [],
       built_in_fetch: typeof fetch === "function",
+      multipart_form_data: typeof FormData === "function",
       text_decoder: typeof TextDecoder === "function",
     },
     model: MODEL,
     model_selection: { default: MODEL, contains_4k: MODEL_4K, case_sensitive: false },
     endpoint_path: ENDPOINT_PATH,
-    supported_api_modes: ["generate"],
+    edit_endpoint_path: EDIT_ENDPOINT_PATH,
+    supported_api_modes: ["generate", "edit"],
 
     output_directory: outputDirectory,
     network_request_performed: false,
@@ -821,14 +894,12 @@ async function runPromptCheck(options) {
 
 async function runGenerateOrEdit(options) {
   const mode = options.command;
-  if (mode === "edit") {
-    throwSkill("E_EDIT_UNSUPPORTED", "The configured Images API only documents generation. Use a callable built-in image editor or provide an edit API contract.");
-  }
   const prompt = await readPrompt(options.promptFile, mode);
   const config = await readConfig();
+  const images = mode === "edit" ? await loadInputImages(options.images) : [];
   const payload = buildPayload(prompt.text, mode, options.size);
 
-  const summary = requestSummary(payload, mode);
+  const summary = requestSummary(payload, mode, images);
   const outputPath = resolveOutputPath(options);
   await ensureWritableDirectory(path.dirname(outputPath));
   if (!options.force && fs.existsSync(outputPath)) {
@@ -848,11 +919,11 @@ async function runGenerateOrEdit(options) {
       request_summary: summary,
 
       network_request_performed: false,
-      warnings: [],
+      warnings: editWarnings(payload, mode),
     };
   }
 
-  const response = await requestImage(config, payload);
+  const response = await requestImage(config, payload, mode, images);
   const imageBytes = decodeBase64Strict(response.imageBase64);
   verifyPngBytes(imageBytes);
   const written = await writePng(outputPath, imageBytes, options.force);
@@ -868,10 +939,12 @@ async function runGenerateOrEdit(options) {
     height: written.height,
     prompt_characters: prompt.characters,
     result_source: response.source,
+    input_image_count: images.length,
+    endpoint_path: endpointPath(mode),
 
     attempts: response.attempts,
     network_request_performed: true,
-    warnings: response.warnings,
+    warnings: [...response.warnings, ...editWarnings(payload, mode)],
   };
 }
 
@@ -1028,11 +1101,21 @@ async function runSelfTest() {
 
   await record("unsupported-api-options", async () => {
     let code = null;
-    try { buildPayload(samplePrompt, "edit", "auto"); } catch (error) { code = error.code; }
-    assertTest(code === "E_EDIT_UNSUPPORTED", "edit must fail locally");
-    code = null;
     try { parseArgs(["generate", "--reasoning-effort", "high"]); } catch (error) { code = error.code; }
     assertTest(code === "E_RUNTIME", "reasoning must fail locally");
+  });
+
+  await record("edit-multipart-contract", async () => {
+    for (const base of ["https://example.invalid", "https://example.invalid/v1/"]) {
+      assertTest(buildEndpoint(base, "edit") === "https://example.invalid/v1/images/edits", "edit endpoint mismatch");
+    }
+    const editPayload = buildPayload("First image is the base; second image is the logo.", "edit", "auto");
+    const bytes = decodeBase64Strict(pngBase64);
+    const images = [{ filename: "original.png", mime: detectImageMime(bytes), bytes }, { filename: "logo.png", mime: "image/png", bytes }];
+    const form = buildMultipart(editPayload, images);
+    assertTest(form.getAll("image[]").map((file) => file.name).join(",") === "original.png,logo.png", "image order mismatch");
+    assertTest(form.get("prompt") === editPayload.prompt && !form.has("quality"), "multipart fields mismatch");
+    assertTest(requestSummary(editPayload, "edit", images).endpoint_path === EDIT_ENDPOINT_PATH, "summary route mismatch");
   });
 
 

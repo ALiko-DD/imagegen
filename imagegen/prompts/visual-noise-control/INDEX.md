@@ -52,7 +52,7 @@ Use this recipe when the requested result is a pristine, high-fidelity photograp
 3. Add `clean.pristine-surfaces` and other clean-rendering clauses only to backgrounds, gradients, graphic elements, or surfaces that should actually be smooth and pristine.
 4. Use `photo.studio-lighting` only for a requested or clearly entailed controlled studio/catalog setup; otherwise use the scene's physically plausible lighting.
 5. Use `clean.no-film-grain` only when a grain-free finish is requested or clearly compatible with the intended medium.
-6. Treat `high resolution` as a request for resolved, output-relevant detail, not permission to invent `8K`, `16K`, HDR, extreme sharpening, or uniform micro-detail. API `quality: high` remains a separate runtime setting.
+6. Treat `high resolution` as a request for resolved, output-relevant detail, not permission to invent `8K`, `16K`, HDR, extreme sharpening, or uniform micro-detail. The runtime omits the API `quality` field and leaves that setting to the provider; Prompt wording does not force an API quality value.
 7. When high-contrast text, a logo, label linework, or fine graphics sit on a smooth photographic surface, apply the text-neighborhood safeguard below; general low-noise wording is insufficient for this risk.
 
 For a clean studio product image, the usual stack is:

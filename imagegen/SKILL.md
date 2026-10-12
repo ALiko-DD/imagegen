@@ -1,6 +1,6 @@
 ---
 name: imagegen
-description: Generate raster images or edit them with a callable built-in image tool with source-audited native-format Prompts, thirteen mutually exclusive structure families, composable visual-noise controls, environment checks, and a deterministic configured Images API fallback. Use when Codex must create a PNG, reduce avoidable visual noise or synthetic rendering, preserve quality during image editing, handle a hidden image_generation tool Schema, or respond to an explicit $imagegen request.
+description: Generate or edit raster images with source-audited native-format Prompts, thirteen mutually exclusive structure families, composable visual-noise controls, environment checks, and a configured Images API fallback with ordered reference-image uploads. Use when Codex must create a PNG, edit original images or combine references, reduce avoidable visual noise or synthetic rendering, preserve quality during image editing, or respond to an explicit $imagegen request.
 ---
 
 # ImageGen
@@ -27,7 +27,7 @@ Resolve this file's directory as `<skill-dir>`. Load references progressively:
 - Never expose bearer tokens, authorization headers, full configuration, or the full Prompt in diagnostics.
 - Never create a substitute image with SVG, HTML, Canvas, Pillow, or procedural rendering.
 - Never use fallback routing to bypass safety, content, permission, policy, or destructive-action refusal.
-- The configured `/v1/images/generations` API supports generation only. Use reference-image editing only with a callable built-in editor; otherwise report that an edit API contract is required.
+- Route text-only generation to `/v1/images/generations`. Route reference-image tasks and changes to an original image to `/v1/images/edits`, using repeated `--image` paths in the intended order. Never silently convert a failed edit to text-only generation.
 - Read `.codex/config.toml` without modifying it. Never remove `.codex` or its configuration during image execution.
 
 ## Workflow
@@ -153,11 +153,14 @@ Read [runtime-contract.md](references/runtime-contract.md), select the runtime o
 ```text
 <runtime> "<skill-dir>/scripts/imagegen.<ext>" preflight
 <runtime> "<skill-dir>/scripts/imagegen.<ext>" generate --prompt-file "<prompt-file>" --size "<size>" --out-dir "<outputs>"
+<runtime> "<skill-dir>/scripts/imagegen.<ext>" edit --prompt-file "<prompt-file>" --image "<base-image>" --image "<reference-image>" --size "<size>" --out-dir "<outputs>"
 ```
 
-For one requested generated image, launch exactly one foreground `generate` command with `timeout_ms: 660000` or greater. The runtime owns the sole technical retry. After command failure, stop the pass. Do not automatically rerun the command, switch runtimes, revise the Prompt, or attempt another fallback within the same pass.
+For editing, make image roles explicit in the saved Prompt: for example, image 1 is the original/base and image 2 is the logo to place. Preserve the intended ordering in repeated `--image` arguments. Node.js uses built-in FormData; Python editing requires `requests`. Check/install that dependency before the authorized editing command, not after a failed request.
 
-For two or more independent requested images, one user-authorized pass may contain multiple independent jobs. Before launching, create a job ledger containing each unique job ID, checked Prompt path, unique explicit output path, mode, size, state `not_started`, process handle, and final result. Reject duplicate IDs, duplicate output paths, existing outputs, or dependencies inside the concurrent set. Each configured API job remains exactly one Prompt, one output, and one `generate` command; never use `--force` for a batch.
+For one requested image, launch exactly one foreground `generate` or `edit` command with `timeout_ms: 660000` or greater. The runtime owns the sole technical retry. After command failure, stop the pass. Do not automatically rerun the command, switch runtimes, revise the Prompt, or attempt another fallback within the same pass.
+
+For two or more independent requested images, one user-authorized pass may contain multiple independent jobs. Before launching, create a job ledger containing each unique job ID, checked Prompt path, ordered reference-image paths when editing, unique explicit output path, mode, size, state `not_started`, process handle, and final result. Reject duplicate IDs, duplicate output paths, existing outputs, or dependencies inside the concurrent set. Each configured API job remains exactly one Prompt, one output, and one `generate` or `edit` command; never use `--force` for a batch.
 
 Use the execution environment's managed background-process facility to stagger and overlap independent jobs:
 
@@ -170,7 +173,7 @@ Use the execution environment's managed background-process facility to stagger a
 
 Do not fake concurrency. If the current execution surface cannot reliably keep multiple background processes alive, retain their handles, enforce the schedule/cap, and collect every exit result, safely degrade the independent jobs to serial execution and report that limitation. Do not use detached shell tricks or claim overlap that was not observed. For `N <= 5`, give the overall collection/wait operation at least `660000 + (N - 1) * 10000` milliseconds. For more than five jobs, use a conservative limit that gives the final capacity-delayed job at least 660 seconds after its actual start; do not claim a precise finish time because slot availability depends on earlier job duration.
 
-The configured API cannot execute edits or consume reference images. Its `edit` command fails locally with `E_EDIT_UNSUPPORTED`, including during dry runs. Never turn an edit request into text-only generation.
+The user has live-verified multipart editing with `gpt-image-2-2k`, ordered PNG references, and a valid returned 2048×2048 PNG. Existing case-insensitive `4k` Prompt routing still applies to edits, but 4K editing remains unverified and the runtime reports that limitation. Other edit models, masks, and streaming editing have not been live-verified. Do not claim they have; do not add undocumented fields.
 
 Jobs with output dependencies are never concurrent. For reference-image edit plus a multi-output series, run the baseline edit as one serial stage; only after it succeeds and is verified may its fully prepared, mutually independent series jobs enter the staggered concurrent set.
 
@@ -195,7 +198,7 @@ Report:
 - absolute output path, actual width and height, and execution route;
 - whether the runtime performed its internal technical retry;
 - any mismatch between requested size, provider metadata, and actual PNG dimensions; returned quality when reported by the provider;
-- the unavailable configured-edit route when applicable;
+- unverified editing features when applicable;
 - unresolved limitations.
 
 Do not claim artifact-free output or lossless editing when no visual review was requested. Do not claim success when the file is missing or invalid.

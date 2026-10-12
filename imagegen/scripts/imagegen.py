@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Dependency-free fallback runtime for the imagegen Skill."""
+"""Images API runtime; Python editing uses requests for multipart encoding."""
 
 from __future__ import annotations
 
@@ -9,6 +9,8 @@ import binascii
 from datetime import datetime
 import hashlib
 import http.client
+import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -29,6 +31,9 @@ import urllib.parse
 MODEL = "gpt-image-2-2k"
 MODEL_4K = "gpt-image-2-4k"
 ENDPOINT_PATH = "/v1/images/generations"
+EDIT_ENDPOINT_PATH = "/v1/images/edits"
+MAX_INPUT_IMAGES = 16
+MAX_INPUT_BYTES = 50 * 1024 * 1024
 MAX_PROMPT_CHARACTERS = 20_000
 RECOMMENDED_PROMPT_CHARACTERS = {"min": 200, "max": 4_000}
 REQUEST_TIMEOUT_SECONDS = 600
@@ -150,7 +155,7 @@ def build_parser() -> argparse.ArgumentParser:
         operation.add_argument("--force", action="store_true")
         operation.add_argument("--dry-run", action="store_true")
         if command == "edit":
-            operation.add_argument("--image", action="append", required=True)
+            operation.add_argument("--image", action="append", default=[])
 
     verify = subparsers.add_parser("verify")
     verify.add_argument("--file", required=True)
@@ -383,27 +388,80 @@ def read_prompt(prompt_file: str, mode: str) -> Dict[str, Any]:
     }
 
 
-def build_endpoint(base_url: str) -> str:
+def endpoint_path(mode: str) -> str:
+    return EDIT_ENDPOINT_PATH if mode == "edit" else ENDPOINT_PATH
+
+
+def build_endpoint(base_url: str, mode: str = "generate") -> str:
     trimmed = base_url.rstrip("/")
+    suffix = endpoint_path(mode)
     if trimmed.lower().endswith("/v1"):
-        return trimmed + "/images/generations"
-    return trimmed + ENDPOINT_PATH
+        return trimmed + suffix[3:]
+    return trimmed + suffix
 
 
 def build_payload(prompt_text: str, mode: str, size: str) -> Dict[str, Any]:
-    if mode != "generate":
-        fail("E_EDIT_UNSUPPORTED", "The configured Images API only documents generation. Use a callable built-in image editor or provide an edit API contract.")
     payload = {"model": MODEL_4K if "4k" in prompt_text.lower() else MODEL, "prompt": prompt_text}
     if size != "auto":
         payload["size"] = size
     return payload
 
 
-def request_summary(payload: Dict[str, Any], mode: str) -> Dict[str, Any]:
+def detect_image_mime(data: bytes) -> str:
+    if data.startswith(PNG_SIGNATURE):
+        return "image/png"
+    if data.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    fail("E_EDIT_INPUT", "Reference images must contain PNG, JPEG, or WebP data.")
+
+
+def load_input_images(image_paths: List[str]) -> List[Dict[str, Any]]:
+    if not image_paths or len(image_paths) > MAX_INPUT_IMAGES:
+        fail("E_EDIT_INPUT", "The edit command requires 1–16 --image files.")
+    images = []
+    for image_path in image_paths:
+        resolved = Path(image_path).resolve()
+        try:
+            if not resolved.is_file() or resolved.stat().st_size > MAX_INPUT_BYTES:
+                fail("E_EDIT_INPUT", "Each reference image must be a file no larger than 50 MiB.")
+            data = resolved.read_bytes()
+        except OSError as error:
+            fail("E_EDIT_INPUT", f"Could not read reference image: {safe_text(error)}")
+        if len(data) > MAX_INPUT_BYTES:
+            fail("E_EDIT_INPUT", "Each reference image must be no larger than 50 MiB.")
+        images.append({"path": str(resolved), "filename": resolved.name, "mime": detect_image_mime(data), "bytes": data})
+    return images
+
+
+def multipart_library():
+    try:
+        import requests
+    except ImportError:
+        fail("E_RUNTIME", "Python editing requires requests. Install it with this runtime: python -m pip install requests")
+    return requests
+
+
+def prepare_multipart(endpoint: str, payload: Dict[str, Any], images: List[Dict[str, Any]]):
+    requests = multipart_library()
+    files = [("image[]", (image["filename"], io.BytesIO(image["bytes"]), image["mime"])) for image in images]
+    return requests.Request("POST", endpoint, data=payload, files=files).prepare()
+
+
+def edit_warnings(payload: Dict[str, Any], mode: str) -> List[str]:
+    return ["The user verified editing with gpt-image-2-2k only; 4K editing has not been live-verified."] if mode == "edit" and payload["model"] != MODEL else []
+
+
+def request_summary(payload: Dict[str, Any], mode: str, images: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
+    images = images or []
     return {
         "model": payload["model"],
         "size": payload.get("size"),
-        "endpoint_path": ENDPOINT_PATH,
+        "endpoint_path": endpoint_path(mode),
+        "request_format": "multipart/form-data" if mode == "edit" else "application/json",
+        "input_image_count": len(images),
+        "input_images": [{"path": image["path"], "mime": image["mime"], "bytes": len(image["bytes"])} for image in images],
         "mode": mode,
         "response_format": "json",
         "prompt_sha256": hashlib.sha256(payload["prompt"].encode("utf-8")).hexdigest(),
@@ -614,15 +672,22 @@ class NoRedirectHandler(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, request, response, code, message, headers, new_url):
         return None
 
-def request_once(config: Dict[str, str], payload: Dict[str, Any]) -> Dict[str, Any]:
-    endpoint = build_endpoint(config["base_url"])
+def request_once(config: Dict[str, str], payload: Dict[str, Any], mode: str, images: List[Dict[str, Any]]) -> Dict[str, Any]:
+    endpoint = build_endpoint(config["base_url"], mode)
+    if mode == "edit":
+        prepared = prepare_multipart(endpoint, payload, images)
+        body = prepared.body
+        content_type = prepared.headers["Content-Type"]
+    else:
+        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        content_type = "application/json"
     request = urllib.request.Request(
         endpoint,
-        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        data=body,
         method="POST",
         headers={
             "Authorization": f"Bearer {config['token']}",
-            "Content-Type": "application/json",
+            "Content-Type": content_type,
             "Accept": "application/json",
             "Connection": "keep-alive",
         },
@@ -681,12 +746,12 @@ def request_once(config: Dict[str, str], payload: Dict[str, Any]) -> Dict[str, A
         )
 
 
-def request_image(config: Dict[str, str], payload: Dict[str, Any]) -> Dict[str, Any]:
+def request_image(config: Dict[str, str], payload: Dict[str, Any], mode: str, images: List[Dict[str, Any]]) -> Dict[str, Any]:
     last_error: Optional[SkillError] = None
     for attempt in range(2):
         try:
             return {
-                **request_once(config, payload),
+                **request_once(config, payload, mode, images),
                 "attempts": attempt + 1,
             }
         except SkillError as error:
@@ -718,18 +783,20 @@ def run_preflight(args: argparse.Namespace) -> Dict[str, Any]:
             "credential_field": config["token_key"],
         },
         "dependencies": {
-            "external_packages": [],
+            "external_packages": ["requests (edit only)"],
+            "multipart_requests_available": importlib.util.find_spec("requests") is not None,
             "standard_library_http": True,
             "strict_utf8_decoder": True,
         },
         "model": MODEL,
         "model_selection": {"default": MODEL, "contains_4k": MODEL_4K, "case_sensitive": False},
         "endpoint_path": ENDPOINT_PATH,
-        "supported_api_modes": ["generate"],
+        "edit_endpoint_path": EDIT_ENDPOINT_PATH,
+        "supported_api_modes": ["generate", "edit"],
 
         "output_directory": str(output_directory),
         "network_request_performed": False,
-        "warnings": [],
+        "warnings": [] if importlib.util.find_spec("requests") is not None else ["Install requests before Python editing: python -m pip install requests"],
     }
 
 
@@ -765,13 +832,14 @@ def run_prompt_check(args: argparse.Namespace) -> Dict[str, Any]:
 
 def run_generate_or_edit(args: argparse.Namespace) -> Dict[str, Any]:
     mode = args.command
-    if mode == "edit":
-        fail("E_EDIT_UNSUPPORTED", "The configured Images API only documents generation. Use a callable built-in image editor or provide an edit API contract.")
     prompt = read_prompt(args.prompt_file, mode)
     config = read_config()
+    images = load_input_images(args.image) if mode == "edit" else []
+    if mode == "edit":
+        multipart_library()
     payload = build_payload(prompt["text"], mode, args.size)
 
-    summary = request_summary(payload, mode)
+    summary = request_summary(payload, mode, images)
     output_path = resolve_output_path(args)
     ensure_writable_directory(output_path.parent)
     if output_path.exists() and not args.force:
@@ -790,11 +858,11 @@ def run_generate_or_edit(args: argparse.Namespace) -> Dict[str, Any]:
             "request_summary": summary,
 
             "network_request_performed": False,
-            "warnings": [],
+            "warnings": edit_warnings(payload, mode),
 
         }
 
-    response = request_image(config, payload)
+    response = request_image(config, payload, mode, images)
     image_data = decode_base64_strict(response["image_base64"])
     verify_png_bytes(image_data)
     written = write_png(output_path, image_data, args.force)
@@ -810,10 +878,12 @@ def run_generate_or_edit(args: argparse.Namespace) -> Dict[str, Any]:
         "height": written["height"],
         "prompt_characters": prompt["characters"],
         "result_source": response["source"],
+        "input_image_count": len(images),
+        "endpoint_path": endpoint_path(mode),
 
         "attempts": response["attempts"],
         "network_request_performed": True,
-        "warnings": response["warnings"],
+        "warnings": response["warnings"] + edit_warnings(payload, mode),
 
     }
 
@@ -955,17 +1025,23 @@ def run_self_test() -> Dict[str, Any]:
 
     unsupported_code = None
     try:
-        build_payload(sample_prompt, "edit", "auto")
-    except SkillError as error:
-        unsupported_code = error.code
-    assert_test(unsupported_code == "E_EDIT_UNSUPPORTED", "edit must fail locally")
-    unsupported_code = None
-    try:
         build_parser().parse_args(["generate", "--prompt-file", "prompt.txt", "--reasoning-effort", "high"])
     except SkillError as error:
         unsupported_code = error.code
     assert_test(unsupported_code == "E_RUNTIME", "reasoning must fail locally")
     tests.append("unsupported-api-options")
+
+    for base in ("https://example.invalid", "https://example.invalid/v1/"):
+        assert_test(build_endpoint(base, "edit") == "https://example.invalid/v1/images/edits", "edit endpoint mismatch")
+    edit_payload = build_payload("First image is the base; second image is the logo.", "edit", "auto")
+    assert_test(edit_payload["model"] == MODEL and "quality" not in edit_payload, "edit fields mismatch")
+    code = None
+    try:
+        load_input_images([])
+    except SkillError as error:
+        code = error.code
+    assert_test(code == "E_EDIT_INPUT", "edit must require images")
+    tests.append("edit-request-contract")
 
 
 
@@ -1009,6 +1085,8 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
 
 
 def main() -> int:
+    sys.stdout.reconfigure(encoding="utf-8")
+    sys.stderr.reconfigure(encoding="utf-8")
     try:
         args = build_parser().parse_args()
         emit_json(run(args))
